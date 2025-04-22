@@ -6,7 +6,7 @@ import logging
 import statistics
 import networkx as nx
 import random
-import cov_support
+#import cov_support
 import cProfile
 import pstats
 import time
