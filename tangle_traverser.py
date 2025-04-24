@@ -211,7 +211,7 @@ def is_forward_unique(oriented_node, original_graph):
     """Checks if an oriented node has exactly one outgoing edge."""
     return len(list(original_graph.successors(oriented_node))) == 1
 
-def calculate_median_unique_coverage(nor_nodes, original_graph, cov):
+def calculate_median_unique_coverage(nor_nodes, original_graph, cov, min_b):
     """
     Calculates the median coverage of nodes in nor_nodes that are structurally unique.
     A node is structurally unique if both its '+' and '-' orientations satisfy
@@ -226,7 +226,7 @@ def calculate_median_unique_coverage(nor_nodes, original_graph, cov):
         is_minus_unique = is_forward_unique(-node_id, original_graph)
 
         if is_plus_unique and is_minus_unique:
-            if node_id in cov:
+            if node_id in cov and cov[node_id] < min_b:
                 coverage = float(cov[node_id])
                 unique_coverages.append(coverage)
                 unique_node_ids.add(node_id)
@@ -782,11 +782,14 @@ def coverage_from_graph(assembly_graph):
             logging.error("Coverage file not provided, failed to get coverage from the assembly graph gfa")
             exit()
     return cov
-def calculate_median_coverage(args, nor_nodes, original_graph, cov):
+def calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nodes):
     """Calculate or use provided median unique coverage."""
+    min_b = 1000000
+    for b in boundary_nodes:
+        min_b = min(min_b, cov[b])
     if args.median_unique is not None:
         return args.median_unique
-    calculated_median = calculate_median_unique_coverage(nor_nodes, original_graph, cov)
+    calculated_median = calculate_median_unique_coverage(nor_nodes, original_graph, cov, min_b)
     if calculated_median is not None:
         return calculated_median
     logging.error("Failed to calculate median unique coverage. Provide it manually with --median-unique.")
@@ -966,7 +969,7 @@ def main():
         cov = read_coverage_file(args.coverage_file)
     else:
         cov = coverage_from_graph(original_graph)
-    median_unique = calculate_median_coverage(args, nor_nodes, original_graph, cov)    
+    median_unique = calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nodes)    
     alignments = parse_gaf(args.alignment, used_nodes, args.filtered_alignment_file, args.quality_threshold)
     
     #Shit is hidden here
