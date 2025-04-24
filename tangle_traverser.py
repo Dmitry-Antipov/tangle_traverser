@@ -15,7 +15,12 @@ import time
 #only positive ids (unoriented)
 node_id_to_name = {}
 
+
+#Multiplicities detection magic is here
 def solve_integer_system(equations, nonzeros, boundary_nodes, a_values, num_solutions=3):
+    #last element in equation - amount of boundary nodes
+
+
     # Create a linear programming problem
     prob = pulp.LpProblem("Minimize_Deviation", pulp.LpMinimize)
     
@@ -28,29 +33,37 @@ def solve_integer_system(equations, nonzeros, boundary_nodes, a_values, num_solu
     # Objective function: minimize sum of absolute deviations
     objective = pulp.lpSum(d_vars[i] for i in a_values)
     prob += objective
-    
+
     # Constraints: x_i = x_j + x_k + x_l
-    #for lhs, rhs in equations.items():
-     #   prob += x_vars[lhs] == sum(x_vars[j] for j in rhs)
+    # for lhs, rhs in equations.items():
+    # prob += x_vars[lhs] == sum(x_vars[j] for j in rhs)
+    # last - constant for boundary node
     for eq in equations:
-        boundary = 0
-        real_nodes = []
-        for j in eq[1:]:
-            if j in boundary_nodes:
-                boundary += 1
-            else:
-                real_nodes.append(j)
-        prob += x_vars[eq[0]] == sum (x_vars[j] for j in real_nodes) + boundary
+        prob += sum(x_vars[j] for j in eq[0][:-1]) + eq[0][-1] == sum(x_vars[j] for j in eq[1][:-1]) + eq[1][-1]
+
     for x_var in x_vars:
         if x_var in nonzeros:
             prob += x_vars[x_var] >= 1
         else:
             prob += x_vars[x_var] >= 0
+
+    #TODO: possibly better to add boundary nodes as variables to simplify equations
+    #for x_var in boundary_nodes:
+    #    prob += x_vars[x_var] == 1
+
     # Constraints for absolute deviation linearization: d_i >= |x_i - a_i|
     for i in a_values:
         prob += d_vars[i] >= x_vars[i] - a_values[i]
         prob += d_vars[i] >= a_values[i] - x_vars[i]
-    
+
+    # Debug output for the problem
+    logging.debug("Linear programming problem:")
+    logging.debug(f"Objective: {prob.objective}")
+    for constraint in prob.constraints.values():
+        logging.debug(f"Constraint: {constraint}")
+    for var in x_vars.values():
+        logging.debug(f"Variable: {var.name}, LowBound: {var.lowBound}, Cat: {var.cat}")
+
     solutions = []
     iter = 0
     all_inds = {}
@@ -421,6 +434,7 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
             reachable_end_vertices.append(v)
     if len(reachable_end_vertices) != 1:
         logging.error(f"Wrong amount of reachable end vertices {start_vertex} {reachable_end_vertices} all end vertices {end_vertices}")
+        exit()
         return []
     end_vertex = reachable_end_vertices[0]
 
@@ -456,9 +470,10 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
         logging.info(f"Randomized Eulerian path found with seed {seed} with {len(path)} nodes !")
         return path
     else:
-        logging.info(f"Path not found from {start_vertex}")
+        logging.error(f"Path not found from {start_vertex}")
         for v in reachable_subgraph.nodes():
             logging.info(f"{v}: in {reachable_subgraph.in_degree[v]} out {reachable_subgraph.out_degree[v]}")
+        exit()
         return []
 
 def get_gaf_path(path):
@@ -683,6 +698,9 @@ def node_to_tangle(directed_graph, length_cutoff, target_node):
 
     # Get the connected component containing the target node        
     connected_component = nx.node_connected_component(indirect_graph, target_node)
+    logging.info(f"Total {len(connected_component)} tangle nodes in connected component")
+    for u in connected_component:
+        logging.debug(f"Tangle node {abs(u)}")
     rc_component = nx.node_connected_component(indirect_graph, -target_node)
     connected_component.update(rc_component)
     return connected_component
@@ -741,14 +759,14 @@ def read_tangle_nodes(args, original_graph):
     return tangle_nodes, nor_nodes
 
 def read_coverage_file(coverage_file):
-    """Read coverage data from file."""
+    """node_id\tnode_cov"""
     logging.info(f"Reading coverage from {coverage_file}")
     cov = {}
     with open(coverage_file, 'r') as f:
         for line in f:
             arr = line.strip().split()
             #Usual cov csv format starts with node*
-            if len(arr) == 2 and arr[0] != "node":
+            if len(arr) >= 2 and arr[0] != "node":
                 node_id = parse_node_id(arr[0])
                 cov[node_id] = arr[1]
     return cov
@@ -780,10 +798,10 @@ def write_solutions_to_file(output_file, solutions, cov):
         with open(output_file, 'w') as out_file:
             out_file.write("node\tcoverage\tmult\n")
             if solutions:
-                for node in cov.keys():
-                    mult_value = solutions[0].get(node, "X")
-                    cov_value = cov.get(node, "N/A")
-                    out_file.write(f"{node}\t{cov_value}\t{mult_value}\n")
+                for node_id in cov.keys():                    
+                    mult_value = solutions[0][0].get(node_id, "X")
+                    cov_value = cov.get(node_id, "N/A")
+                    out_file.write(f"{node_id_to_name[node_id]}\t{cov_value}\t{mult_value}\n")
     except IOError as e:
         logging.error(f"Failed to write output file {output_file}: {e}")
         sys.exit(1)
@@ -842,25 +860,35 @@ def generate_equations_and_values(tangle_nodes, nor_nodes, cov, median_unique, o
 
     # Generate equations
     for from_node in tangle_nodes:
-        if len(list(original_graph.successors(from_node))) != 1:
-            correct = True
-            for to_node in original_graph.successors(from_node):
-                rc_to_node = rc_node(to_node)
-                if len(list(original_graph.successors(rc_to_node))) != 1:
-                    correct = False
-                    break
-            if correct:
-                arr = [abs(from_node)]
-                for node in original_graph.successors(from_node):
-                    if abs(node) in nor_nodes or abs(node) in boundary_nodes:
-                        arr.append(abs(node))
-                equations.append(arr)
+        arr = [[],[]]
+        back_node = ""
+        boundary = [0,0]
+        for to_node in original_graph.successors(from_node):
+            if abs(to_node) in boundary_nodes:
+                boundary[1] += 1
+            elif abs(to_node) in tangle_nodes:
+                arr[1].append(abs(to_node))
+            else:
+                logging.error(f"somehow jumped over boundary nodes{from_node} {to_node} { boundary_nodes}")
+            back_node = to_node
+        if back_node != "":
+            for alt_start_node in original_graph.predecessors(back_node):
+                if abs(alt_start_node) in boundary_nodes:
+                    boundary[0] += 1
+                elif abs(alt_start_node) in tangle_nodes:                    
+                    arr[0].append(abs(alt_start_node))
+                else:
+                    logging.error(f"somehow jumped over boundary nodes{alt_start_node} {to_node} { boundary_nodes}")
+        for i in [0, 1]:
+            arr[i].append(boundary[i])            
+        equations.append(arr)
 
     # Prepare nonzeros = nodes that we always want to include and a_values = "observed multiplicities"
     nonzeros = []
     a_values = {}
-    for node in nor_nodes:
+    for node in nor_nodes:        
         a_values[node] = float(cov[node]) / median_unique
+        logging.debug(f"Observed multiplicity of {node} : {a_values[node]}")
         if a_values[node] >= 0.5:
             nonzeros.append(node)
 
@@ -946,7 +974,8 @@ def main():
     equations, nonzeros, a_values = generate_equations_and_values(tangle_nodes, nor_nodes, cov, median_unique, original_graph, boundary_nodes)
     #Failed to generate suboptimal solutions yet
     solutions = solve_integer_system(equations, nonzeros, boundary_nodes, a_values, num_solutions=10)
-    
+    if args.output_multiplicities:
+        write_solutions_to_file(args.output_multiplicities, solutions, cov)
     # Extract the first solution (dictionary) from the tuple
     best_solution = solutions[0][0] if solutions else {}
     #Some implementations of pulp would give you 2.0 instead of 2
