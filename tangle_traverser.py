@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import sys
 import pulp
 import argparse
@@ -6,7 +6,7 @@ import logging
 import statistics
 import networkx as nx
 import random
-#import cov_support
+import math
 import cProfile
 import pstats
 import time
@@ -14,10 +14,15 @@ import time
 # Add a global map for node ID to string node names
 #only positive ids (unoriented)
 node_id_to_name = {}
-
+#allowed median coverage range in range [median_unique/MEDIAN_COVERAGE_VARIATION, median_unique * MEDIAN_COVERAGE_VARIATION]
+DETECTED_MEDIAN_COVERAGE_VARIATION = 1.5
+GIVEN_MEDIAN_COVERAGE_VARIATION = 1.2
 
 #Multiplicities detection magic is here
-def solve_integer_system(equations, nonzeros, boundary_nodes, a_values, num_solutions=3):
+#TODO: length-based weights?
+#TODO:  unique coverage as a variable (implemented)
+#TODO: detect not-supported node triples to start path-swapping with them?
+def solve_integer_system(equations, nonzeros, boundary_nodes, a_values, unique_coverage_range, num_solutions=3):
     #last element in equation - amount of boundary nodes
 
 
@@ -30,6 +35,8 @@ def solve_integer_system(equations, nonzeros, boundary_nodes, a_values, num_solu
     # Define continuous variables for absolute deviation |x_i - a_i|
     d_vars = {i: pulp.LpVariable(f"d_{i}", lowBound=0, cat="Continuous") for i in a_values}
     
+    inv_unique_coverage = pulp.LpVariable("uniqueness_multiplier", lowBound=1/unique_coverage_range[1], upBound=1/unique_coverage_range[0], cat="Continuous")
+
     # Objective function: minimize sum of absolute deviations
     objective = pulp.lpSum(d_vars[i] for i in a_values)
     prob += objective
@@ -53,8 +60,8 @@ def solve_integer_system(equations, nonzeros, boundary_nodes, a_values, num_solu
 
     # Constraints for absolute deviation linearization: d_i >= |x_i - a_i|
     for i in a_values:
-        prob += d_vars[i] >= x_vars[i] - a_values[i]
-        prob += d_vars[i] >= a_values[i] - x_vars[i]
+        prob += d_vars[i] >= x_vars[i] - a_values[i] * inv_unique_coverage
+        prob += d_vars[i] >= a_values[i] * inv_unique_coverage - x_vars[i] 
 
     # Debug output for the problem
     logging.debug("Linear programming problem:")
@@ -77,10 +84,13 @@ def solve_integer_system(equations, nonzeros, boundary_nodes, a_values, num_solu
         score = pulp.value(objective)  
         for ind in all_inds.keys():
             if pulp.value(ind) > 0:
-                logging.info (f"nonzero {ind} {pulp.value(ind)} {all_inds[ind]}")
-                
+                logging.info (f"nonzero {ind} {pulp.value(ind)} {all_inds[ind]}")                
                 break
         logging.info (f"iteration of MIP {iter}")
+        detected_coverage = 1/pulp.value(inv_unique_coverage)
+        logging.info (f"Unique coverage for the best MIP solution {detected_coverage}")
+        if abs(detected_coverage - unique_coverage_range[0]) < 0.01 or abs(detected_coverage - unique_coverage_range[1]) < 0.01:
+            logging.info (f"Warning, detected best coverage is close to the allowed unique coverage borders{unique_coverage_range}")                                                                        
         # Check if the solver found a feasible solution
         if pulp.LpStatus[prob.status] != "Optimal" or result in solutions or None in result.values():
             break  # No more unique solutions found or no feasible solution
@@ -226,11 +236,13 @@ def calculate_median_unique_coverage(nor_nodes, original_graph, cov, min_b):
         is_minus_unique = is_forward_unique(-node_id, original_graph)
 
         if is_plus_unique and is_minus_unique:
-            if node_id in cov and cov[node_id] < min_b:
+            if node_id in cov and cov[node_id] < min_b * GIVEN_MEDIAN_COVERAGE_VARIATION:
                 coverage = float(cov[node_id])
                 unique_coverages.append(coverage)
                 unique_node_ids.add(node_id)
                 logging.debug(f"Node {node_id} is unique. Coverage: {coverage}")
+            elif cov[node_id] >= min_b * GIVEN_MEDIAN_COVERAGE_VARIATION:
+                logging.debug(f"Node {node_id} looks structurally unique but coverage {coverage} is higher than borders {min_b} * variation {GIVEN_MEDIAN_COVERAGE_VARIATION}")
             else:
                 logging.warning(f"Structurally unique node {node_id} not found in coverage file.")
         #else:
@@ -473,6 +485,9 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
         logging.error(f"Path not found from {start_vertex}")
         for v in reachable_subgraph.nodes():
             logging.info(f"{v}: in {reachable_subgraph.in_degree[v]} out {reachable_subgraph.out_degree[v]}")
+        for v in reachable_subgraph.nodes():
+            if reachable_subgraph.in_degree[v] != reachable_subgraph.out_degree[v]:
+                logging.warning(f"Not Eulerian {v}: in {reachable_subgraph.in_degree[v]} out {reachable_subgraph.out_degree[v]}")
         exit()
         return []
 
@@ -494,6 +509,8 @@ def get_gaf_string(path):
     #logging.info(res)
     return res
 
+#TODO: suffix arrays can do it better and faster, two iterators
+#Or suffix tree
 def score_compressed_path(alignments, path):
     res = 0    
     for add in range (2, len(alignments)):
@@ -703,10 +720,27 @@ def node_to_tangle(directed_graph, length_cutoff, target_node):
         logging.debug(f"Tangle node {abs(u)}")
     rc_component = nx.node_connected_component(indirect_graph, -target_node)
     connected_component.update(rc_component)
+    
     return connected_component
 
+def clean_tips (tangle_nodes, directed_graph):
+    #removing tips from tangle and graph
+    changed= True
+    while changed:
+        changed = False
+        to_erase = []
+        for n in tangle_nodes:
+            if directed_graph.out_degree(n) == 0 or directed_graph.in_degree(n) == 0:
+                changed = True
+                to_erase.append(n)
+        for n in to_erase:
+            logging.info(f"Cleaning {n} from tangle")
+            tangle_nodes.remove(n)
+            directed_graph.remove_node(n)
+            
+
+
 def setup_logging(args):
-    """Setup logging configuration."""
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
     log_format = '%(asctime)s - %(levelname)s - %(message)s'
     if args.log_file:
@@ -714,9 +748,7 @@ def setup_logging(args):
     else:
         logging.basicConfig(level=log_level, format=log_format, stream=sys.stderr)
 
-# Update the parse_arguments function to include new options
 def parse_arguments():
-    """Parse command-line arguments."""
     parser = argparse.ArgumentParser(description="Solve for integer multiplicities in a GFA tangle graph based on coverage.")
     parser.add_argument("gfa_file", help="Path to the GFA file.")
     parser.add_argument("alignment", help="Path to a file with graphaligner alignment")
@@ -741,7 +773,7 @@ def read_tangle_nodes(args, original_graph):
     """Read or construct tangle nodes."""
     if args.tangle_file:
         tangle_nodes = set()
-        nor_nodes = set()
+      #  nor_nodes = set()
         with open(args.tangle_file, 'r') as f:
             for line in f:
                 node_str = line.strip()
@@ -749,14 +781,14 @@ def read_tangle_nodes(args, original_graph):
                     node_id = parse_node_id(node_str)
                     tangle_nodes.add(node_id)
                     tangle_nodes.add(-node_id)
-                    nor_nodes.add(node_id)
+                  #  nor_nodes.add(node_id)
     elif args.tangle_node:
         tangle_nodes = node_to_tangle(original_graph, args.tangle_length_cutoff, target_node=parse_node_id(args.tangle_node))
-        nor_nodes = {abs(node) for node in tangle_nodes}
+        #nor_nodes = {abs(node) for node in tangle_nodes}
     else:
         logging.error("Either --tangle_file or --tangle_node must be provided.")
         sys.exit(1)
-    return tangle_nodes, nor_nodes
+    return tangle_nodes
 
 def read_coverage_file(coverage_file):
     """node_id\tnode_cov"""
@@ -768,7 +800,7 @@ def read_coverage_file(coverage_file):
             #Usual cov csv format starts with node*
             if len(arr) >= 2 and arr[0] != "node":
                 node_id = parse_node_id(arr[0])
-                cov[node_id] = arr[1]
+                cov[node_id] = float(arr[1])
     return cov
 
 def coverage_from_graph(assembly_graph):
@@ -782,17 +814,22 @@ def coverage_from_graph(assembly_graph):
             logging.error("Coverage file not provided, failed to get coverage from the assembly graph gfa")
             exit()
     return cov
+
 def calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nodes):
     """Calculate or use provided median unique coverage."""
     min_b = 1000000
     for b in boundary_nodes:
+        logging.info (f"{b} {cov[b]}")
         min_b = min(min_b, cov[b])
     if args.median_unique is not None:
-        return args.median_unique
+        return [args.median_unique/GIVEN_MEDIAN_COVERAGE_VARIATION, args.median_unique * GIVEN_MEDIAN_COVERAGE_VARIATION]
     calculated_median = calculate_median_unique_coverage(nor_nodes, original_graph, cov, min_b)
     if calculated_median is not None:
-        return calculated_median
-    logging.error("Failed to calculate median unique coverage. Provide it manually with --median-unique.")
+        return [calculated_median/DETECTED_MEDIAN_COVERAGE_VARIATION, calculated_median* DETECTED_MEDIAN_COVERAGE_VARIATION]
+    else:
+        res = [min_b/DETECTED_MEDIAN_COVERAGE_VARIATION, min_b* DETECTED_MEDIAN_COVERAGE_VARIATION]
+        logging.warning(f"Failed to calculate median unique coverage for tangle. Using coverage based on neighbours {res} but better provide it manually with--median-unique.")
+        return res
     sys.exit(1)
 
 def write_solutions_to_file(output_file, solutions, cov):
@@ -838,7 +875,7 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, alignments, num_
             new_score = score_compressed_path(reformed_alignments, new_path)
             
             if new_score > current_score:
-                logging.debug(f"Improved score for seed {seed} at iteration {i}: {current_score} -> {new_score}.")
+                logging.info(f"Improved score for seed {seed} at iteration {i}: {current_score} -> {new_score}.")
                 current_path = new_path
                 current_score = new_score
                 iterations_since_improvement = 0
@@ -872,7 +909,7 @@ def generate_equations_and_values(tangle_nodes, nor_nodes, cov, median_unique, o
             elif abs(to_node) in tangle_nodes:
                 arr[1].append(abs(to_node))
             else:
-                logging.error(f"somehow jumped over boundary nodes{from_node} {to_node} { boundary_nodes}")
+                logging.error(f"somehow jumped over boundary nodes {from_node} {to_node} { boundary_nodes}")
             back_node = to_node
         if back_node != "":
             for alt_start_node in original_graph.predecessors(back_node):
@@ -890,9 +927,9 @@ def generate_equations_and_values(tangle_nodes, nor_nodes, cov, median_unique, o
     nonzeros = []
     a_values = {}
     for node in nor_nodes:        
-        a_values[node] = float(cov[node]) / median_unique
+        a_values[node] = float(cov[node]) #/ median_unique
         logging.debug(f"Observed multiplicity of {node} : {a_values[node]}")
-        if a_values[node] >= 0.5:
+        if a_values[node] / median_unique >= 0.5:
             nonzeros.append(node)
 
     return equations, nonzeros, a_values
@@ -960,7 +997,10 @@ def main():
 
     #TODO: save it somewhere, some connections added while parsing    
     original_graph = parse_gfa(args.gfa_file)
-    tangle_nodes, nor_nodes = read_tangle_nodes(args, original_graph)    
+    tangle_nodes = read_tangle_nodes(args, original_graph)    
+    clean_tips(tangle_nodes, original_graph)
+    nor_nodes = {abs(node) for node in tangle_nodes}
+
     boundary_nodes = identify_boundary_nodes(original_graph, tangle_nodes)
 
     used_nodes = nor_nodes.copy()
@@ -969,14 +1009,15 @@ def main():
         cov = read_coverage_file(args.coverage_file)
     else:
         cov = coverage_from_graph(original_graph)
-    median_unique = calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nodes)    
+    median_unique_range = calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nodes)    
+    median_unique = math.sqrt(median_unique_range[0] * median_unique_range[1])
     alignments = parse_gaf(args.alignment, used_nodes, args.filtered_alignment_file, args.quality_threshold)
     
     #Shit is hidden here
     logging.info("Starting multiplicity counting...")
     equations, nonzeros, a_values = generate_equations_and_values(tangle_nodes, nor_nodes, cov, median_unique, original_graph, boundary_nodes)
     #Failed to generate suboptimal solutions yet
-    solutions = solve_integer_system(equations, nonzeros, boundary_nodes, a_values, num_solutions=10)
+    solutions = solve_integer_system(equations, nonzeros, boundary_nodes, a_values, median_unique_range, num_solutions=10)
     if args.output_multiplicities:
         write_solutions_to_file(args.output_multiplicities, solutions, cov)
     # Extract the first solution (dictionary) from the tuple
@@ -990,17 +1031,18 @@ def main():
     multi_graph = create_multi_dual_graph(dual_graph, multiplicities, tangle_nodes, boundary_nodes, original_graph)
     
     best_path, best_score = optimize_paths(multi_graph, boundary_nodes, original_graph, alignments, args.num_initial_paths, args.max_iterations, args.early_stopping_limit)
+    logging.info("Path optimizing finished.")
     if best_path:
         best_path_str = get_gaf_string(best_path)
         logging.info(f"Found traversal\t{best_path_str}")
         if args.output_fasta:
+            logging.info (f"Writing best path to {args.output_fasta}")
             output_path_fasta(best_path, original_graph, args.output_fasta)
         if args.output_gaf:
+            logging.info (f"Writing best path to {args.output_gaf}")
             outf = open (args.output_gaf, 'w')
             outf.write(f"tangle\t{best_path_str}\n")
     
-    #TODO: output to fasta
-    logging.info("Path optimizing finished.")
-    #TODO: id 0 for start/end replace?
+
 if __name__ == "__main__":
     main()
