@@ -747,6 +747,15 @@ def setup_logging(args):
         logging.basicConfig(filename=args.log_file, level=log_level, format=log_format, filemode='w')
     else:
         logging.basicConfig(level=log_level, format=log_format, stream=sys.stderr)
+    # Log the GitHub commit hash if available
+    try:
+        commit_hash = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=sys.path[0]).strip().decode('utf-8')
+        logging.info(f"GitHub Commit Hash: {commit_hash}")
+    except Exception as e:
+        logging.warning(f"Failed to retrieve GitHub commit hash: {e}")
+
+    # Log the command-line arguments
+    logging.info(f"Command-line arguments: {' '.join(sys.argv)}")
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Solve for integer multiplicities in a GFA tangle graph based on coverage.")
