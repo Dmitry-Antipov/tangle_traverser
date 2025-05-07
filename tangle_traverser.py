@@ -7,6 +7,7 @@ import statistics
 import networkx as nx
 import random
 import math
+import subprocess
 import cProfile
 import pstats
 import time
@@ -17,6 +18,9 @@ node_id_to_name = {}
 #allowed median coverage range in range [median_unique/MEDIAN_COVERAGE_VARIATION, median_unique * MEDIAN_COVERAGE_VARIATION]
 DETECTED_MEDIAN_COVERAGE_VARIATION = 1.5
 GIVEN_MEDIAN_COVERAGE_VARIATION = 1.2
+
+#Add this length (max) from the nodes neighboring tangle to fasta for better alignment
+UNIQUE_BORDER_LENGTH = 200000
 
 #Multiplicities detection magic is here
 #TODO: length-based weights?
@@ -398,7 +402,7 @@ def create_multi_dual_graph(dual_graph: nx.DiGraph, multiplicities: dict, tangle
 
     return multi_dual_graph
 
-
+#Supplementary for Euler path search
 def next_element(temp_graph, current):
     edges = list(temp_graph.out_edges(current, data=True, keys=True))    
     # Randomly choose the next edge based on seed
@@ -743,10 +747,29 @@ def clean_tips (tangle_nodes, directed_graph):
 def setup_logging(args):
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
     log_format = '%(asctime)s - %(levelname)s - %(message)s'
-    if args.log_file:
-        logging.basicConfig(filename=args.log_file, level=log_level, format=log_format, filemode='w')
-    else:
-        logging.basicConfig(level=log_level, format=log_format, stream=sys.stderr)
+    
+    # Always log to both file and console
+    log_file = args.output + ".log"
+    
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    
+    # Clear any existing handlers
+    root_logger.handlers = []
+    
+    # File handler
+    file_handler = logging.FileHandler(log_file, mode='w')
+    file_handler.setFormatter(logging.Formatter(log_format))
+    file_handler.setLevel(log_level)
+    root_logger.addHandler(file_handler)
+    
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setFormatter(logging.Formatter(log_format))
+    console_handler.setLevel(log_level)
+    root_logger.addHandler(console_handler)
+    
     # Log the GitHub commit hash if available
     try:
         commit_hash = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=sys.path[0]).strip().decode('utf-8')
@@ -756,6 +779,7 @@ def setup_logging(args):
 
     # Log the command-line arguments
     logging.info(f"Command-line arguments: {' '.join(sys.argv)}")
+    logging.info(f"Logging to file: {log_file}")
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Solve for integer multiplicities in a GFA tangle graph based on coverage.")
@@ -763,9 +787,8 @@ def parse_arguments():
     parser.add_argument("alignment", help="Path to a file with graphaligner alignment")
     parser.add_argument("--coverage-file", help="Path to a file with node coverages (node-id coverage). If not provided, coverage will be filled from the GFA file.")
     parser.add_argument("--median-unique", type=float, help="Median coverage for unique nodes.")
-    parser.add_argument("--output-multiplicities", default="mip-mults.csv", help="Path to the output CSV file (default: mip-mults.csv).")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Set the logging level (default: INFO).")
-    parser.add_argument("--log-file", help="Optional file to write logs to (default: stderr).")
+    parser.add_argument("--log-file", help="DEPRECATED: Log file is now automatically set to [output].log. This argument will be removed in future versions.")
     parser.add_argument("--tangle-file", help="Path to a file listing nodes in the tangle (one per line).")
     parser.add_argument("--tangle-node", type=str, help="Node ID to construct tangle as connected component of short edges around it")
     parser.add_argument("--tangle-length-cutoff", type=int, default=500000, help="Length cutoff for tangle detection, default 500K")
@@ -774,8 +797,7 @@ def parse_arguments():
     parser.add_argument("--early-stopping-limit", type=int, default=15000, help="Early stopping limit for optimization (default: 15000).")
     parser.add_argument("--filtered-alignment-file", type=str, help="Filtered alignments to the tangle can be saved in this file for later reuse")
     parser.add_argument("--quality-threshold", type=int, default=0, help="Alignments with quality less than this will be filtered out, default 0 (no quality filtering)")
-    parser.add_argument("--output-fasta", type=str, help="Path to output the best path as a contig in FASTA format.")
-    parser.add_argument("--output-gaf", default="tangle.gaf", type=str, help="Path to output the best path in GAF format.")
+    parser.add_argument("--output", default="tangle", type=str, help="Base name for output files. Will generate [name].multiplicities.csv, [name].gaf, and [name].fasta (default: tangle)")
     return parser.parse_args()
 
 def read_tangle_nodes(args, original_graph):
@@ -851,6 +873,7 @@ def write_solutions_to_file(output_file, solutions, cov):
                     mult_value = solutions[0][0].get(node_id, "X")
                     cov_value = cov.get(node_id, "N/A")
                     out_file.write(f"{node_id_to_name[node_id]}\t{cov_value}\t{mult_value}\n")
+        logging.info(f"Wrote multiplicity solutions to {output_file}")
     except IOError as e:
         logging.error(f"Failed to write output file {output_file}: {e}")
         sys.exit(1)
@@ -953,7 +976,7 @@ def identify_boundary_nodes(original_graph, tangle_nodes):
                 boundary_nodes.add(abs(first))
     return boundary_nodes
 
-#not including border nodes!
+#Only UNIQUE_BORDER_LENGTH (=200K) for border unique nodes used
 def output_path_fasta(best_path, original_graph, output_file):
     """
     Write the best path as a contig in FASTA format.
@@ -966,8 +989,6 @@ def output_path_fasta(best_path, original_graph, output_file):
         contig_sequence = ""
         last_node = None
         for i in range (len(best_path)):
-            if i == 0 or i == len(best_path) - 1:
-                continue
             edge_id = best_path[i][2]
             node_id = abs(edge_id)
             orientation = edge_id > 0
@@ -981,11 +1002,15 @@ def output_path_fasta(best_path, original_graph, output_file):
                 # Reverse complement the sequence if orientation is negative
                 node_sequence = reverse_complement(node_sequence)
 
-            if i == 1:
-                overlap = 0                
+            if i == 0:
+                overlap = max (0, len(node_sequence) - UNIQUE_BORDER_LENGTH)                
             else:                
-                overlap = original_graph.get_edge_data(last_node, edge_id)['overlap']            
-            contig_sequence += node_sequence[overlap:]
+                overlap = original_graph.get_edge_data(last_node, edge_id)['overlap']
+
+            if i == len(best_path) - 1:                            
+                contig_sequence += node_sequence[overlap:min(len(node_sequence),UNIQUE_BORDER_LENGTH)]
+            else:
+                contig_sequence += node_sequence[overlap:]
             last_node = edge_id
 
         # Write the contig to the FASTA file
@@ -1027,8 +1052,15 @@ def main():
     equations, nonzeros, a_values = generate_equations_and_values(tangle_nodes, nor_nodes, cov, median_unique, original_graph, boundary_nodes)
     #Failed to generate suboptimal solutions yet
     solutions = solve_integer_system(equations, nonzeros, boundary_nodes, a_values, median_unique_range, num_solutions=10)
-    if args.output_multiplicities:
-        write_solutions_to_file(args.output_multiplicities, solutions, cov)
+    
+    # Define output filenames based on the base output name
+    output_csv = args.output + ".multiplicities.csv"
+    output_fasta = args.output + ".fasta"
+    output_gaf = args.output + ".gaf"
+    
+    # Write multiplicities to CSV
+    write_solutions_to_file(output_csv, solutions, cov)
+    
     # Extract the first solution (dictionary) from the tuple
     best_solution = solutions[0][0] if solutions else {}
     #Some implementations of pulp would give you 2.0 instead of 2
@@ -1044,12 +1076,14 @@ def main():
     if best_path:
         best_path_str = get_gaf_string(best_path)
         logging.info(f"Found traversal\t{best_path_str}")
-        if args.output_fasta:
-            logging.info (f"Writing best path to {args.output_fasta}")
-            output_path_fasta(best_path, original_graph, args.output_fasta)
-        if args.output_gaf:
-            logging.info (f"Writing best path to {args.output_gaf}")
-            outf = open (args.output_gaf, 'w')
+        
+        # Output FASTA file
+        logging.info(f"Writing best path to {output_fasta}")
+        output_path_fasta(best_path, original_graph, output_fasta)
+        
+        # Output GAF file
+        logging.info(f"Writing best path to {output_gaf}")
+        with open(output_gaf, 'w') as outf:
             outf.write(f"tangle\t{best_path_str}\n")
     
 
