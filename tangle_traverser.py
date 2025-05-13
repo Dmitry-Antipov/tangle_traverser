@@ -26,7 +26,7 @@ UNIQUE_BORDER_LENGTH = 200000
 #TODO: length-based weights?
 #TODO:  unique coverage as a variable (implemented)
 #TODO: detect not-supported node triples to start path-swapping with them?
-def solve_integer_system(equations, nonzeros, boundary_nodes, a_values, unique_coverage_range, num_solutions=3):
+def solve_MIP(equations, nonzeros, boundary_nodes, a_values, unique_coverage_range, num_solutions=3):
     #last element in equation - amount of boundary nodes
 
 
@@ -155,7 +155,9 @@ def parse_gfa(file_path):
                 original_graph.add_node(node_id, length=length, sequence=parts[2], coverage = cov)
                 original_graph.add_node(-node_id, length=length, sequence=reverse_complement(parts[2]), coverage = cov)
 
-            # Process only link lines (L)
+    #links and segments can be interlaced
+    with open(file_path, 'r') as gfa_file:
+        for line in gfa_file:
             if line.startswith('L'):
                 parts = line.strip().split('\t')
                 if len(parts) < 5:
@@ -182,6 +184,8 @@ def parse_gfa(file_path):
                 original_graph.add_edge(rc_node(to_node), rc_node(from_node), overlap=overlap_size)
 
     # Symmetrization of junctions
+    #TODO: should be reimagined.
+    #with missing BD: A+D=B+C, A>= C, B >= D
     for start_node in list(original_graph.nodes):
         end_nodes = set(original_graph.successors(start_node))
         if len(end_nodes) == 0:
@@ -286,6 +290,8 @@ def get_canonical_edge(oriented_node1, oriented_node2, original_graph):
     return (from_node, to_node)
     
 #Transform to dual graph, vertices = junctions, edges = old nodes
+#TODO: vertices should be not exactly junctions but junction+nodes since z-connections are legit
+
 def create_dual_graph(original_graph:nx.MultiDiGraph):
     dual_graph = nx.MultiDiGraph()
     canonical_edges_set = set() # To store unique canonical edges (dual nodes)
@@ -330,13 +336,14 @@ def create_dual_graph(original_graph:nx.MultiDiGraph):
 
     return dual_graph
 
-#as for now, multiplities are for unoriented nodes
-#Transform dual graph to multi-dual graph based on multiplicities
-#TODO: not supporting hairpins and unoriented multiplicities
-
 def is_tangle_vertex (C, tangle_set):
     return C[0] in tangle_set or C[1] in tangle_set
 
+
+#as for now, multiplities are for unoriented nodes
+#TODO: not supporting hairpins and oriented multiplicities
+
+#edge of multiplicity X -> X multiedges multiplicity 1
 def create_multi_dual_graph(dual_graph: nx.DiGraph, multiplicities: dict, tangle_nodes: set, boundary_nodes: set, G):
     multi_dual_graph = nx.MultiDiGraph()
     logging.info("Creating multi-dual graph from dual graph and multiplicities...")
@@ -414,6 +421,7 @@ def next_element(temp_graph, current):
     return ((u, v, int(key.split("_")[0])), v)
 
 #not_oriented border nodes, currently should be just one in one out
+#TODO: non-random starts based on most support?
 def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes, original_graph, seed):
     random.seed(seed)
     #TODO: start from ("Tip, +-border_node"), would simplify code
@@ -421,30 +429,73 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
 
     end_vertices = []
     for n in multi_dual_graph.nodes():
+        #border tips encoding
         if n[0] == 0:
             start_vertices.append(n)
         elif n[1] == 0:
             end_vertices.append(n)
     logging.info(f"Start and end vertices in the graph {start_vertices}, {end_vertices}")
-
-    # Only 1-1 tangles for now
-    if len(start_vertices) != 2 or len(end_vertices) != 2:
-        logging.error(f"border vertices fail") 
-        return []
+    #adding fake links 
     
-    #TODO: possibly add option to always start from specified border node
-    if abs(start_vertices[0][1]) < abs(start_vertices[1][1]):
-        start_vertex = start_vertices[0]
-    else:
-        start_vertex = start_vertices[1]    
+
+    border_nodes_count = len(border_nodes)
+    # Only 1-1 or 2-2 tangles for now
+    if border_nodes_count != 2 and border_nodes_count != 4:
+        logging.error(f"Only 1-1 or 2-2 tangles are supported")
+        return []
+    if len(start_vertices) != border_nodes_count or len(end_vertices) != border_nodes_count:
+        logging.error(f"Border vertices detection fail") 
+        return []
+
+    #TODO: or just first in border_nodes?
+    start_vertex_id = 0
+    for i in range(border_nodes_count):
+        if abs(start_vertices[i][1]) < abs(start_vertices[start_vertex_id][1]):
+            start_vertex_id = i
+    start_vertex = start_vertices[start_vertex_id]
+    start_vertex_node = abs(start_vertex[1])
+    matching_end_vertex_node = border_nodes[start_vertex_node]
+    
+    reachable_verts = nx.descendants(multi_dual_graph, start_vertex)
+    # Add the start_node itself
+    reachable_verts.add(start_vertex)
+    reachable_subgraph = multi_dual_graph.subgraph(reachable_verts)
+    reachable_end_vertices = []
+    for v in reachable_subgraph.nodes():
+        if v in end_vertices:
+            reachable_end_vertices.append(v)
+
+    # If there are 4 border nodes, we need to find the correct end vertex and add the auxiliary connection
+    if border_nodes_count == 4:
+        log_assert(len(reachable_end_vertices) == 2, f"Wrong amount of reachable end vertices {start_vertex} {reachable_end_vertices} {len(reachable_end_vertices)} all end vertices {end_vertices}")
+        first_end_vertex = reachable_end_vertices[0]
+        last_end_vertex = reachable_end_vertices[1]
+        if abs(first_end_vertex[1]) == matching_end_vertex_node:
+            first_end_vertex = reachable_end_vertices[1]
+            last_end_vertex = reachable_end_vertices[0]
+            log_assert(abs(last_end_vertex[1]) != matching_end_vertex_node, f"End vertex detection fail {reachable_end_vertices} {matching_end_vertex_node}")
+        second_end_node = abs(last_end_vertex[0])
+        last_start_node = border_nodes[second_end_node]
+        for v in start_vertices:
+            if abs(v[1]) == last_start_node:
+                second_start_vertex = v
+                break        
+        multi_dual_graph.add_edge(first_end_vertex, second_start_vertex, original_node=0, key = "0_0")
+        node_id_to_name[0] = "AUX"
+
+        
+        logging.info(f"Added auxiliary edge {first_end_vertex} -> {second_start_vertex}")
     logging.info(f"Using start vertex {start_vertex} for seed {seed}")
     reachable_verts = nx.descendants(multi_dual_graph, start_vertex)
     # Add the start_node itself
     reachable_verts.add(start_vertex)
 
-    # Create the subgraph containing only the reachable nodes and edges between them
+    # Recreate reachable subgraph after aux edge added
     reachable_subgraph = multi_dual_graph.subgraph(reachable_verts)
-    reachable_end_vertices = []
+    logging.info (f"some shit")
+    logging.info (f"{list(reachable_subgraph.successors(first_end_vertex))}")
+    logging.info (f"{list(multi_dual_graph.successors(first_end_vertex))}")
+    '''reachable_end_vertices = []
     for v in reachable_subgraph.nodes():
         if v in end_vertices:
             reachable_end_vertices.append(v)
@@ -452,7 +503,7 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
         logging.error(f"Wrong amount of reachable end vertices {start_vertex} {reachable_end_vertices} all end vertices {end_vertices}")
         exit()
         return []
-    end_vertex = reachable_end_vertices[0]
+    end_vertex = reachable_end_vertices[0]'''
 
     # Eulerian path generation, manual to randomize
     if nx.has_eulerian_path(reachable_subgraph, start_vertex):
@@ -781,6 +832,16 @@ def setup_logging(args):
     logging.info(f"Command-line arguments: {' '.join(sys.argv)}")
     logging.info(f"Logging to file: {log_file}")
 
+def log_assert(condition, message, logger=None):
+    """Assert a condition and log an error message if it fails."""
+    if not condition:
+        error_msg = f"Assertion failed: {message}"
+        if logger:
+            logger.error(error_msg)
+        else:
+            logging.error(error_msg)
+        raise AssertionError(error_msg)
+    
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Solve for integer multiplicities in a GFA tangle graph based on coverage.")
     parser.add_argument("gfa_file", help="Path to the GFA file.")
@@ -788,9 +849,9 @@ def parse_arguments():
     parser.add_argument("--coverage-file", help="Path to a file with node coverages (node-id coverage). If not provided, coverage will be filled from the GFA file.")
     parser.add_argument("--median-unique", type=float, help="Median coverage for unique nodes.")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Set the logging level (default: INFO).")
-    parser.add_argument("--log-file", help="DEPRECATED: Log file is now automatically set to [output].log. This argument will be removed in future versions.")
     parser.add_argument("--tangle-file", help="Path to a file listing nodes in the tangle (one per line).")
     parser.add_argument("--tangle-node", type=str, help="Node ID to construct tangle as connected component of short edges around it")
+    parser.add_argument("--boundary-nodes", type=str, help="Path to a file listing boundary node pairs, tab-separated (required for 2-2 tangles).")
     parser.add_argument("--tangle-length-cutoff", type=int, default=500000, help="Length cutoff for tangle detection, default 500K")
     parser.add_argument("--num-initial-paths", type=int, default=10, help="Number of initial paths to generate (default: 10).")
     parser.add_argument("--max-iterations", type=int, default=100000, help="Maximum iterations for path optimization (default: 100000).")
@@ -815,10 +876,16 @@ def read_tangle_nodes(args, original_graph):
                   #  nor_nodes.add(node_id)
     elif args.tangle_node:
         tangle_nodes = node_to_tangle(original_graph, args.tangle_length_cutoff, target_node=parse_node_id(args.tangle_node))
-        #nor_nodes = {abs(node) for node in tangle_nodes}
     else:
         logging.error("Either --tangle_file or --tangle_node must be provided.")
         sys.exit(1)
+
+    with open(args.output + ".nodes", 'w') as f:
+        for node in tangle_nodes:
+            #only forward nodes to file
+            if node > 0:
+                f.write(f"{node_id_to_name[node]}\n")
+
     return tangle_nodes
 
 def read_coverage_file(coverage_file):
@@ -861,9 +928,8 @@ def calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nod
         res = [min_b/DETECTED_MEDIAN_COVERAGE_VARIATION, min_b* DETECTED_MEDIAN_COVERAGE_VARIATION]
         logging.warning(f"Failed to calculate median unique coverage for tangle. Using coverage based on neighbours {res} but better provide it manually with--median-unique.")
         return res
-    sys.exit(1)
 
-def write_solutions_to_file(output_file, solutions, cov):
+def write_multiplicities(output_file, solutions, cov):
     """Write solver solutions to the output file."""
     try:
         with open(output_file, 'w') as out_file:
@@ -924,7 +990,7 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, alignments, num_
     return best_path, best_score
 
 #Messy stuff excluded from main
-def generate_equations_and_values(tangle_nodes, nor_nodes, cov, median_unique, original_graph, boundary_nodes):
+def generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original_graph, boundary_nodes):
     """
     Generate equations, nonzeros, and a_values (observed multiplicities) for solving the integer system.
     """
@@ -966,15 +1032,33 @@ def generate_equations_and_values(tangle_nodes, nor_nodes, cov, median_unique, o
 
     return equations, nonzeros, a_values
 
-def identify_boundary_nodes(original_graph, tangle_nodes):
-    boundary_nodes = set()
-    for first in original_graph.nodes:
-        for second in original_graph.successors(first):
-            if first in tangle_nodes and second not in tangle_nodes:
-                boundary_nodes.add(abs(second))
-            elif second in tangle_nodes and first not in tangle_nodes:
-                boundary_nodes.add(abs(first))
-    return boundary_nodes
+def identify_boundary_nodes(args, original_graph, tangle_nodes):
+    
+    if args.boundary_nodes:
+        boundary_nodes = {}
+        for line in open (args.boundary_nodes):
+            # Parse the line and extract boundary node pairs
+            parts = line.strip().split()
+            if len(parts) == 2:
+                node1 = parse_node_id(parts[0])
+                node2 = parse_node_id(parts[1])
+                boundary_nodes[node1] = node2
+                boundary_nodes[node2] = node1
+        return boundary_nodes
+    else:
+        boundary_nodes = set()
+        for first in original_graph.nodes:
+            for second in original_graph.successors(first):
+                if first in tangle_nodes and second not in tangle_nodes:
+                    boundary_nodes.add(parse_node_id(abs(second)))
+                elif second in tangle_nodes and first not in tangle_nodes:
+                    boundary_nodes.add(abs(first))
+        log_assert(len(boundary_nodes) == 2, f"Autodetection works only for 1-1 tangles, detected boundary: {boundary_nodes}. Specify boundary node pairs manually")
+        res = {}
+        arr = list(boundary_nodes)
+        res[arr[0]] = arr[1]
+        res[arr[1]] = arr[0]
+        return res
 
 #Only UNIQUE_BORDER_LENGTH (=200K) for border unique nodes used
 def output_path_fasta(best_path, original_graph, output_file):
@@ -1023,10 +1107,9 @@ def reverse_complement(sequence):
     complement = str.maketrans('ACGTacgt', 'TGCAtgca')
     return sequence.translate(complement)[::-1]
 
-def main():
+def main():    
     args = parse_arguments()
     setup_logging(args)
-
     logging.info("Reading files...")
 
     #TODO: save it somewhere, some connections added while parsing    
@@ -1034,8 +1117,8 @@ def main():
     tangle_nodes = read_tangle_nodes(args, original_graph)    
     clean_tips(tangle_nodes, original_graph)
     nor_nodes = {abs(node) for node in tangle_nodes}
-
-    boundary_nodes = identify_boundary_nodes(original_graph, tangle_nodes)
+    
+    boundary_nodes = identify_boundary_nodes(args, original_graph, tangle_nodes)
 
     used_nodes = nor_nodes.copy()
     used_nodes.update(boundary_nodes)
@@ -1043,15 +1126,16 @@ def main():
         cov = read_coverage_file(args.coverage_file)
     else:
         cov = coverage_from_graph(original_graph)
+    #TODO: some edges can be missing, fill them with ??? (longest node coverage?)
     median_unique_range = calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nodes)    
     median_unique = math.sqrt(median_unique_range[0] * median_unique_range[1])
     alignments = parse_gaf(args.alignment, used_nodes, args.filtered_alignment_file, args.quality_threshold)
     
     #Shit is hidden here
     logging.info("Starting multiplicity counting...")
-    equations, nonzeros, a_values = generate_equations_and_values(tangle_nodes, nor_nodes, cov, median_unique, original_graph, boundary_nodes)
+    equations, nonzeros, a_values = generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original_graph, boundary_nodes)
     #Failed to generate suboptimal solutions yet
-    solutions = solve_integer_system(equations, nonzeros, boundary_nodes, a_values, median_unique_range, num_solutions=10)
+    solutions = solve_MIP(equations, nonzeros, boundary_nodes, a_values, median_unique_range, num_solutions=10)
     
     # Define output filenames based on the base output name
     output_csv = args.output + ".multiplicities.csv"
@@ -1059,7 +1143,7 @@ def main():
     output_gaf = args.output + ".gaf"
     
     # Write multiplicities to CSV
-    write_solutions_to_file(output_csv, solutions, cov)
+    write_multiplicities(output_csv, solutions, cov)
     
     # Extract the first solution (dictionary) from the tuple
     best_solution = solutions[0][0] if solutions else {}
