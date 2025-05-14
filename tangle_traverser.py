@@ -250,7 +250,7 @@ def calculate_median_unique_coverage(nor_nodes, original_graph, cov, min_b):
                 unique_node_ids.add(node_id)
                 logging.debug(f"Node {node_id} is unique. Coverage: {coverage}")
             elif cov[node_id] >= min_b * GIVEN_MEDIAN_COVERAGE_VARIATION:
-                logging.debug(f"Node {node_id} looks structurally unique but coverage {coverage} is higher than borders {min_b} * variation {GIVEN_MEDIAN_COVERAGE_VARIATION}")
+                logging.debug(f"Node {node_id} looks structurally unique but coverage {cov[node_id]} is higher than borders {min_b} * variation {GIVEN_MEDIAN_COVERAGE_VARIATION}")
             else:
                 logging.warning(f"Structurally unique node {node_id} not found in coverage file.")
         #else:
@@ -483,27 +483,14 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
         multi_dual_graph.add_edge(first_end_vertex, second_start_vertex, original_node=0, key = "0_0")
         node_id_to_name[0] = "AUX"
 
-        
-        logging.info(f"Added auxiliary edge {first_end_vertex} -> {second_start_vertex}")
-    logging.info(f"Using start vertex {start_vertex} for seed {seed}")
-    reachable_verts = nx.descendants(multi_dual_graph, start_vertex)
-    # Add the start_node itself
-    reachable_verts.add(start_vertex)
 
-    # Recreate reachable subgraph after aux edge added
-    reachable_subgraph = multi_dual_graph.subgraph(reachable_verts)
-    logging.info (f"some shit")
-    logging.info (f"{list(reachable_subgraph.successors(first_end_vertex))}")
-    logging.info (f"{list(multi_dual_graph.successors(first_end_vertex))}")
-    '''reachable_end_vertices = []
-    for v in reachable_subgraph.nodes():
-        if v in end_vertices:
-            reachable_end_vertices.append(v)
-    if len(reachable_end_vertices) != 1:
-        logging.error(f"Wrong amount of reachable end vertices {start_vertex} {reachable_end_vertices} all end vertices {end_vertices}")
-        exit()
-        return []
-    end_vertex = reachable_end_vertices[0]'''
+        logging.info(f"Added auxiliary edge {first_end_vertex} -> {second_start_vertex}")
+        reachable_verts = nx.descendants(multi_dual_graph, start_vertex)
+        # Add the start_node itself
+        reachable_verts.add(start_vertex)
+
+        # Recreate reachable subgraph after aux edge added
+        reachable_subgraph = multi_dual_graph.subgraph(reachable_verts)
 
     # Eulerian path generation, manual to randomize
     if nx.has_eulerian_path(reachable_subgraph, start_vertex):
@@ -856,8 +843,8 @@ def parse_arguments():
     parser.add_argument("--num-initial-paths", type=int, default=10, help="Number of initial paths to generate (default: 10).")
     parser.add_argument("--max-iterations", type=int, default=100000, help="Maximum iterations for path optimization (default: 100000).")
     parser.add_argument("--early-stopping-limit", type=int, default=15000, help="Early stopping limit for optimization (default: 15000).")
-    parser.add_argument("--filtered-alignment-file", type=str, help="Filtered alignments to the tangle can be saved in this file for later reuse")
-    parser.add_argument("--quality-threshold", type=int, default=0, help="Alignments with quality less than this will be filtered out, default 0 (no quality filtering)")
+    #TODO: for quality 0 use random of alignments with highest score?
+    parser.add_argument("--quality-threshold", type=int, default=20, help="Alignments with quality less than this will be filtered out, default 20")
     parser.add_argument("--output", default="tangle", type=str, help="Base name for output files. Will generate [name].multiplicities.csv, [name].gaf, and [name].fasta (default: tangle)")
     return parser.parse_args()
 
@@ -1050,7 +1037,7 @@ def identify_boundary_nodes(args, original_graph, tangle_nodes):
         for first in original_graph.nodes:
             for second in original_graph.successors(first):
                 if first in tangle_nodes and second not in tangle_nodes:
-                    boundary_nodes.add(parse_node_id(abs(second)))
+                    boundary_nodes.add(abs(second))
                 elif second in tangle_nodes and first not in tangle_nodes:
                     boundary_nodes.add(abs(first))
         log_assert(len(boundary_nodes) == 2, f"Autodetection works only for 1-1 tangles, detected boundary: {boundary_nodes}. Specify boundary node pairs manually")
@@ -1129,7 +1116,8 @@ def main():
     #TODO: some edges can be missing, fill them with ??? (longest node coverage?)
     median_unique_range = calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nodes)    
     median_unique = math.sqrt(median_unique_range[0] * median_unique_range[1])
-    alignments = parse_gaf(args.alignment, used_nodes, args.filtered_alignment_file, args.quality_threshold)
+    filtered_alignment_file = args.output + f".q{args.quality_threshold}.used_alignments.gaf"
+    alignments = parse_gaf(args.alignment, used_nodes, filtered_alignment_file, args.quality_threshold)
     
     #Shit is hidden here
     logging.info("Starting multiplicity counting...")
