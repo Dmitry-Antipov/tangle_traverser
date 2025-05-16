@@ -11,6 +11,7 @@ import subprocess
 import cProfile
 import pstats
 import time
+import os
 
 # Add a global map for node ID to string node names
 #only positive ids (unoriented)
@@ -785,9 +786,9 @@ def clean_tips (tangle_nodes, directed_graph):
 def setup_logging(args):
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
     log_format = '%(asctime)s - %(levelname)s - %(message)s'
-    
+        
     # Always log to both file and console
-    log_file = args.output + ".log"
+    log_file = os.path.join(args.output, "tangle_traverser.log")
     
     # Configure root logger
     root_logger = logging.getLogger()
@@ -830,9 +831,10 @@ def log_assert(condition, message, logger=None):
         raise AssertionError(error_msg)
     
 def parse_arguments():
+    #TODO: directory with output?
     parser = argparse.ArgumentParser(description="Solve for integer multiplicities in a GFA tangle graph based on coverage.")
-    parser.add_argument("gfa_file", help="Path to the GFA file.")
-    parser.add_argument("alignment", help="Path to a file with graphaligner alignment")
+    parser.add_argument("--gfa", required=True, dest="gfa_file", help="Path to the GFA file.")
+    parser.add_argument("--alignment", required=True, help="Path to a file with graphaligner alignment")
     parser.add_argument("--coverage-file", help="Path to a file with node coverages (node-id coverage). If not provided, coverage will be filled from the GFA file.")
     parser.add_argument("--median-unique", type=float, help="Median coverage for unique nodes.")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Set the logging level (default: INFO).")
@@ -845,7 +847,7 @@ def parse_arguments():
     parser.add_argument("--early-stopping-limit", type=int, default=15000, help="Early stopping limit for optimization (default: 15000).")
     #TODO: for quality 0 use random of alignments with highest score?
     parser.add_argument("--quality-threshold", type=int, default=20, help="Alignments with quality less than this will be filtered out, default 20")
-    parser.add_argument("--output", default="tangle", type=str, help="Base name for output files. Will generate [name].multiplicities.csv, [name].gaf, and [name].fasta (default: tangle)")
+    parser.add_argument("--output", required=True, type=str, help="Output directory for all result files (will be created if it doesn't exist)")
     return parser.parse_args()
 
 def read_tangle_nodes(args, original_graph):
@@ -867,7 +869,7 @@ def read_tangle_nodes(args, original_graph):
         logging.error("Either --tangle_file or --tangle_node must be provided.")
         sys.exit(1)
 
-    with open(args.output + ".nodes", 'w') as f:
+    with open(os.path.join(args.output, "nodes.txt"), 'w') as f:
         for node in tangle_nodes:
             #only forward nodes to file
             if node > 0:
@@ -1099,6 +1101,9 @@ def main():
     setup_logging(args)
     logging.info("Reading files...")
 
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output, exist_ok=True)
+
     #TODO: save it somewhere, some connections added while parsing    
     original_graph = parse_gfa(args.gfa_file)
     tangle_nodes = read_tangle_nodes(args, original_graph)    
@@ -1116,7 +1121,7 @@ def main():
     #TODO: some edges can be missing, fill them with ??? (longest node coverage?)
     median_unique_range = calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nodes)    
     median_unique = math.sqrt(median_unique_range[0] * median_unique_range[1])
-    filtered_alignment_file = args.output + f".q{args.quality_threshold}.used_alignments.gaf"
+    filtered_alignment_file = os.path.join(args.output, f"q{args.quality_threshold}.used_alignments.gaf")
     alignments = parse_gaf(args.alignment, used_nodes, filtered_alignment_file, args.quality_threshold)
     
     #Shit is hidden here
@@ -1125,10 +1130,10 @@ def main():
     #Failed to generate suboptimal solutions yet
     solutions = solve_MIP(equations, nonzeros, boundary_nodes, a_values, median_unique_range, num_solutions=10)
     
-    # Define output filenames based on the base output name
-    output_csv = args.output + ".multiplicities.csv"
-    output_fasta = args.output + ".fasta"
-    output_gaf = args.output + ".gaf"
+    # Define output filenames based on the output directory
+    output_csv = os.path.join(args.output, "multiplicities.csv")
+    output_fasta = os.path.join(args.output, "traversal.fasta")
+    output_gaf = os.path.join(args.output, "traversal.gaf")
     
     # Write multiplicities to CSV
     write_multiplicities(output_csv, solutions, cov)
