@@ -12,6 +12,7 @@ import cProfile
 import pstats
 import time
 import os
+import ahocorasick
 
 # Add a global map for node ID to string node names
 #only positive ids (unoriented)
@@ -552,6 +553,48 @@ def get_gaf_string(path):
     #logging.info(res)
     return res
 
+
+def build_alignment_automaton(alignments):
+    automaton = ahocorasick.Automaton()
+    pattern_counts = {}
+    
+    # Add each alignment as a pattern to match
+    for idx, alignment in enumerate(alignments):
+        # Convert alignment to string for matching
+        logging.debug(f"Adding alignment {idx}: {alignment}")
+        pattern_str = ",".join(str(node) for node in alignment)
+        
+        # Store the pattern and its count
+        if pattern_str not in pattern_counts:
+            pattern_counts[pattern_str] = 0
+            # Add to automaton only once per unique pattern
+            automaton.add_word(pattern_str, pattern_str)
+        
+        pattern_counts[pattern_str] += 1
+    
+    # Finalize the automaton
+    automaton.make_automaton()
+    logging.debug(f"automaton keys {list(automaton.keys())}")
+    logging.info(f"Built automaton with {len(pattern_counts)} unique alignment patterns")
+    return automaton, pattern_counts
+
+def score_corasick(automaton, pattern_count, path):
+    node_ids = [edge[2] for edge in path]
+    path_length = len(node_ids)
+    path_str = ",".join(str(node) for node in node_ids)
+    logging.debug(f"Scoring path: {path_str}")
+    logging.debug(f"automaton {automaton}")
+    found = set()
+    for item in automaton.iter(path_str):
+        pattern = item[1]
+        found.add(pattern)
+        logging.debug(item)
+    score = 0
+    for item in found:
+        score += pattern_count.get(item)
+    logging.debug(score)
+    return score
+
 #TODO: suffix arrays can do it better and faster, two iterators
 #Or suffix tree
 def score_compressed_path(alignments, path):
@@ -785,7 +828,9 @@ def clean_tips (tangle_nodes, directed_graph):
 
 def setup_logging(args):
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
-    log_format = '%(asctime)s - %(levelname)s - %(message)s'
+    # Exclude date, include time, function name, and line number
+    log_format = '%(asctime)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s'
+    datefmt = '%H:%M:%S'
         
     # Always log to both file and console
     log_file = os.path.join(args.output, "tangle_traverser.log")
@@ -799,13 +844,13 @@ def setup_logging(args):
     
     # File handler
     file_handler = logging.FileHandler(log_file, mode='w')
-    file_handler.setFormatter(logging.Formatter(log_format))
+    file_handler.setFormatter(logging.Formatter(log_format, datefmt=datefmt))
     file_handler.setLevel(log_level)
     root_logger.addHandler(file_handler)
     
     # Console handler
     console_handler = logging.StreamHandler(sys.stderr)
-    console_handler.setFormatter(logging.Formatter(log_format))
+    console_handler.setFormatter(logging.Formatter(log_format, datefmt=datefmt))
     console_handler.setLevel(log_level)
     root_logger.addHandler(console_handler)
     
@@ -934,7 +979,7 @@ def write_multiplicities(output_file, solutions, cov):
         sys.exit(1)
 
 # Update the optimize_paths function to use command-line options for default parameters
-def optimize_paths(multi_graph, boundary_nodes, original_graph, alignments, num_initial_paths, max_iterations, early_stopping_limit):
+def optimize_paths(multi_graph, boundary_nodes, original_graph, alignments, num_initial_paths, max_iterations, early_stopping_limit, automaton, pattern_counts):
     """Optimize Eulerian paths."""
     best_path = None
     best_score = -1
@@ -949,9 +994,9 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, alignments, num_
             continue
         
         current_path = path
-        current_score = score_compressed_path(reformed_alignments, path)
+        current_score = score_corasick(automaton, pattern_counts, current_path)
         logging.info(f"Initial path score for seed {seed}: {current_score}.")
-        
+
         iterations_since_improvement = 0
         for i in range(max_iterations):
             if iterations_since_improvement >= early_stopping_limit:
@@ -959,8 +1004,8 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, alignments, num_
                 break
             
             new_path = get_random_change(current_path, seed * max_iterations + i)
-            new_score = score_compressed_path(reformed_alignments, new_path)
-            
+            #new_score = score_compressed_path(reformed_alignments, new_path)
+            new_score = 
             if new_score > current_score:
                 logging.info(f"Improved score for seed {seed} at iteration {i}: {current_score} -> {new_score}.")
                 current_path = new_path
@@ -1098,11 +1143,12 @@ def reverse_complement(sequence):
 
 def main():    
     args = parse_arguments()
+    os.makedirs(args.output, exist_ok=True)
+
     setup_logging(args)
     logging.info("Reading files...")
 
     # Create output directory if it doesn't exist
-    os.makedirs(args.output, exist_ok=True)
 
     #TODO: save it somewhere, some connections added while parsing    
     original_graph = parse_gfa(args.gfa_file)
@@ -1123,7 +1169,7 @@ def main():
     median_unique = math.sqrt(median_unique_range[0] * median_unique_range[1])
     filtered_alignment_file = os.path.join(args.output, f"q{args.quality_threshold}.used_alignments.gaf")
     alignments = parse_gaf(args.alignment, used_nodes, filtered_alignment_file, args.quality_threshold)
-    
+    automaton, pattern_counts = build_alignment_automaton(alignments)
     #Shit is hidden here
     logging.info("Starting multiplicity counting...")
     equations, nonzeros, a_values = generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original_graph, boundary_nodes)
@@ -1148,7 +1194,7 @@ def main():
     dual_graph = create_dual_graph(original_graph)
     multi_graph = create_multi_dual_graph(dual_graph, multiplicities, tangle_nodes, boundary_nodes, original_graph)
     
-    best_path, best_score = optimize_paths(multi_graph, boundary_nodes, original_graph, alignments, args.num_initial_paths, args.max_iterations, args.early_stopping_limit)
+    best_path, best_score = optimize_paths(multi_graph, boundary_nodes, original_graph, alignments, args.num_initial_paths, args.max_iterations, args.early_stopping_limit, automaton, pattern_counts)
     logging.info("Path optimizing finished.")
     if best_path:
         best_path_str = get_gaf_string(best_path)
