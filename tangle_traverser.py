@@ -719,9 +719,16 @@ def parse_gaf(gaf_file, interesting_nodes, filtered_file, quality_threshold=0):
                     break
                 if fnode[0] == "<":
                     int_node = -int_node
-                nodes.append(int_node)                        
+                nodes.append(int_node)   
+            rc_nodes = [-n for n in nodes]
+            rc_nodes.reverse()
+            #lexicographical minimum
+            #if ",".join(nodes) > ",".join(rc_nodes):
+             #   nodes = rc_nodes
             if good and len(nodes) > 2:
                 res.append(nodes)
+                #TODO: use lexicographical minimum?
+                res.append(rc_nodes)
                 if filtered_file:
                     out_file.write(line)
             #Not appending reverce-complement, this is processed in scoring!
@@ -1005,7 +1012,7 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, alignments, num_
             
             new_path = get_random_change(current_path, seed * max_iterations + i)
             #new_score = score_compressed_path(reformed_alignments, new_path)
-            new_score = 
+            new_score = score_corasick(automaton, pattern_counts, new_path)
             if new_score > current_score:
                 logging.info(f"Improved score for seed {seed} at iteration {i}: {current_score} -> {new_score}.")
                 current_path = new_path
