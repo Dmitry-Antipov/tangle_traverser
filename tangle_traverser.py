@@ -840,8 +840,8 @@ def setup_logging(args):
     datefmt = '%H:%M:%S'
         
     # Always log to both file and console
-    log_file = os.path.join(args.output, "tangle_traverser.log")
-    
+    log_file = os.path.join(args.output, f"{args.basename}.log")
+
     # Configure root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
@@ -883,7 +883,6 @@ def log_assert(condition, message, logger=None):
         raise AssertionError(error_msg)
     
 def parse_arguments():
-    #TODO: directory with output?
     parser = argparse.ArgumentParser(description="Solve for integer multiplicities in a GFA tangle graph based on coverage.")
     parser.add_argument("--gfa", required=True, dest="gfa_file", help="Path to the GFA file.")
     parser.add_argument("--alignment", required=True, help="Path to a file with graphaligner alignment")
@@ -900,6 +899,7 @@ def parse_arguments():
     #TODO: for quality 0 use random of alignments with highest score?
     parser.add_argument("--quality-threshold", type=int, default=20, help="Alignments with quality less than this will be filtered out, default 20")
     parser.add_argument("--output", required=True, type=str, help="Output directory for all result files (will be created if it doesn't exist)")
+    parser.add_argument("--basename", required=False, type=str, help="Basename for most of the output files, default `traversal`")
     return parser.parse_args()
 
 def read_tangle_nodes(args, original_graph):
@@ -1174,7 +1174,7 @@ def main():
     #TODO: some edges can be missing, fill them with ??? (longest node coverage?)
     median_unique_range = calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nodes)    
     median_unique = math.sqrt(median_unique_range[0] * median_unique_range[1])
-    filtered_alignment_file = os.path.join(args.output, f"q{args.quality_threshold}.used_alignments.gaf")
+    filtered_alignment_file = os.path.join(args.output, f"{args.basename}.q{args.quality_threshold}.used_alignments.gaf")
     alignments = parse_gaf(args.alignment, used_nodes, filtered_alignment_file, args.quality_threshold)
     automaton, pattern_counts = build_alignment_automaton(alignments)
     #Shit is hidden here
@@ -1184,10 +1184,10 @@ def main():
     solutions = solve_MIP(equations, nonzeros, boundary_nodes, a_values, median_unique_range, num_solutions=10)
     
     # Define output filenames based on the output directory
-    output_csv = os.path.join(args.output, "multiplicities.csv")
-    output_fasta = os.path.join(args.output, "traversal.fasta")
-    output_gaf = os.path.join(args.output, "traversal.gaf")
-    
+    output_csv = os.path.join(args.output, args.basename + ".multiplicities.csv")
+    output_fasta = os.path.join(args.output, args.basename + ".fasta")
+    output_gaf = os.path.join(args.output, args.basename + ".gaf")
+
     # Write multiplicities to CSV
     write_multiplicities(output_csv, solutions, cov)
     
