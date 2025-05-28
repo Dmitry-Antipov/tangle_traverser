@@ -670,16 +670,7 @@ def parse_gaf(gaf_file, interesting_nodes, filtered_file, quality_threshold=0):
                 res.append(rc_nodes)
                 if filtered_file:
                     out_file.write(line)
-            #Not appending reverce-complement, this is processed in scoring!
     return  res 
-
-#comppressed storing for graphaligner alignments.
-def add_pair(add, start_a, end_a, arr):
-    if not (start_a in arr[add].keys()):
-        arr[add][start_a] = {}
-    if not (end_a in arr[add][start_a]):
-        arr[add][start_a][end_a] = 0
-    arr[add][start_a][end_a] += 1
 
 #utig4-234 -> 234
 def parse_node_id(node_str):    
@@ -697,8 +688,10 @@ def parse_node_id(node_str):
         node_id = int(parts[1])
 
     #utig4-0 same as its RC
-    if node_id == 0:
-        node_id = 123123123
+    if node_id < last_enumerated_node:
+        last_enumerated_node += 1
+        node_id = last_enumerated_node
+        logging.info(f"Assigned enumerated ID {node_id} to node {node_str}, utig4-0 special case")
     node_id_to_name[node_id] = node_str
     return node_id
 
