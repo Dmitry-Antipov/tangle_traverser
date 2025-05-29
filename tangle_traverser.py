@@ -17,6 +17,7 @@ import ahocorasick
 # Add a global map for node ID to string node names
 #only positive ids (unoriented)
 node_id_to_name = {}
+name_to_node_id = {}
 last_enumerated_node = 0
 #allowed median coverage range in range [median_unique/MEDIAN_COVERAGE_VARIATION, median_unique * MEDIAN_COVERAGE_VARIATION]
 DETECTED_MEDIAN_COVERAGE_VARIATION = 1.5
@@ -27,14 +28,26 @@ UNIQUE_BORDER_LENGTH = 200000
 
 #Multiplicities detection magic is here
 #TODO: length-based weights?
-#TODO:  unique coverage as a variable (implemented)
-#TODO: detect not-supported node triples to start path-swapping with them?
 def solve_MIP(equations, nonzeros, boundary_values, coverages, unique_coverage_range):
     #last element in equation - amount of boundary nodes
 
     prob = pulp.LpProblem("Minimize_Deviation", pulp.LpMinimize)    
     # Define multiplicity variables    
-    x_vars = {i: pulp.LpVariable(f"x_{i}", cat="Integer") for i in coverages}
+
+    keys = set()
+    abs_keys = set()
+    for eq in equations:
+        keys.update(eq[0])
+        keys.update(eq[1])
+        for ind in (0, 1):
+            for j in eq[ind]:
+                abs_keys.add(abs(j))
+    for key in abs_keys:
+        log_assert(key in keys and -key in keys, f"One of the keys {key} or {-key} is not in equations {equations}")
+        log_assert(key in coverages , f"Key {key} is not in coverages")
+
+    #TODO: we can check for hairpin presence just here.
+    x_vars = {i: pulp.LpVariable(f"x_{i}", cat="Integer") for i in keys}
 
     # Constraints: x_i = x_j + x_k + x_l
     # for lhs, rhs in equations.items():
@@ -43,11 +56,10 @@ def solve_MIP(equations, nonzeros, boundary_values, coverages, unique_coverage_r
         prob += sum(x_vars[j] for j in eq[0])  == sum(x_vars[j] for j in eq[1]) 
 
     for x_var in x_vars:
-        if x_var in nonzeros:
-            prob += x_vars[x_var] >= 1
-        else:
-            prob += x_vars[x_var] >= 0
-    
+        prob += x_vars[x_var] >= 0
+        if x_var > 0 and x_var in nonzeros:
+            prob += x_vars[x_var] + x_vars[-x_var] >= 1
+
     #boundary nodes set
     for x_var in boundary_values:
         prob += x_vars[x_var] == boundary_values[x_var]
@@ -56,11 +68,11 @@ def solve_MIP(equations, nonzeros, boundary_values, coverages, unique_coverage_r
     # Define continuous variables for absolute deviation |x_i - a_i|
     d_vars = {i: pulp.LpVariable(f"d_{i}", lowBound=0, cat="Continuous") for i in coverages}   
     inv_unique_coverage = pulp.LpVariable("uniqueness_multiplier", lowBound=1/unique_coverage_range[1], upBound=1/unique_coverage_range[0], cat="Continuous")
-    for i in coverages:
-        prob += d_vars[i] >= x_vars[i] - coverages[i] * inv_unique_coverage
-        prob += d_vars[i] >= coverages[i] * inv_unique_coverage - x_vars[i] 
+    for i in abs_keys:
+        prob += d_vars[i] >= (x_vars[i] + x_vars[-i]) - coverages[i] * inv_unique_coverage
+        prob += d_vars[i] >= coverages[i] * inv_unique_coverage - x_vars[i] - x_vars[-i]
     # Objective function: minimize sum of absolute deviations
-    objective = pulp.lpSum(d_vars[i] for i in coverages)
+    objective = pulp.lpSum(d_vars[i] for i in abs_keys)
     prob += objective
 
     logging.debug("Linear programming problem:")
@@ -76,7 +88,9 @@ def solve_MIP(equations, nonzeros, boundary_values, coverages, unique_coverage_r
     
     if pulp.LpStatus[prob.status] != "Optimal":
         logging.warning("MIP did not find an optimal solution.")
-    result = {i: pulp.value(x_vars[i]) for i in coverages}
+    result = {i: int(pulp.value(x_vars[i])) for i in keys}
+    
+    logging.info(f"Found multiplicities from MIP {result}")
     score = pulp.value(objective)  
     detected_coverage = 1/pulp.value(inv_unique_coverage)
     logging.info (f"Unique coverage for the best MIP solution {detected_coverage}, solution score {score}")
@@ -147,6 +161,7 @@ def parse_gfa(file_path):
     # Symmetrization of junctions
     #TODO: should be reimagined.
     #with missing BD: A+D=B+C, A>= C, B >= D
+    non_transitive_junctions = 0
     for start_node in list(original_graph.nodes):
         end_nodes = set(original_graph.successors(start_node))
         if len(end_nodes) == 0:
@@ -170,13 +185,14 @@ def parse_gfa(file_path):
                                 overlap_sizes.append(original_graph[n1][n2].get('overlap', 0))
                                 min_overlap = min(overlap_sizes) if overlap_sizes else 0
                                 original_graph.add_edge(start_node, n2, overlap=min_overlap)
-                                logging.warning(f"Non-transitive junction! Adding {start_node} -> {n2}, overlap {min_overlap}")
+                                logging.debug(f"Non-transitive junction! Adding {start_node} -> {n2}, overlap {min_overlap}")
+                                non_transitive_junctions += 1
                                 overlap_counted = True
                                 break
                         if not overlap_counted:
-                            logging.error(f"Non-transitive junction failed to get overlap. Adding {start_node} -> {n2}, overlap 0")
+                            logging.warning(f"Non-transitive junction failed to get overlap. Adding {start_node} -> {n2}, overlap 0")
                             original_graph.add_edge(start_node, n2, overlap=0)
-
+    logging.info(f"Tuned non-transitive junctions: {non_transitive_junctions}")
     return original_graph
 
 #RC nodes stored as negative
@@ -232,7 +248,7 @@ def calculate_median_unique_coverage(nor_nodes, original_graph, cov, min_b):
     logging.debug(f"Unique coverages: {unique_coverages}")
     return median_cov
    
-def get_canonical_edge(oriented_node1, oriented_node2, original_graph):
+def get_canonical_nodepair(oriented_node1, oriented_node2, original_graph):
     """Returns a canonical lexicographically smallest link for a junction"""
     to_node = oriented_node2
     from_node = oriented_node1
@@ -249,7 +265,11 @@ def get_canonical_edge(oriented_node1, oriented_node2, original_graph):
         logging.warning(f"{from_node} -> {list(original_graph.successors(from_node))}")
         logging.warning(f"{rc_node(to_node)} -> {list(original_graph.successors(rc_node(to_node)))}")        
     return (from_node, to_node)
-    
+
+def get_canonical_rc_vertex(v, original_graph):
+    """Returns a canonical reverse connection vertex for a given vertex"""
+    return get_canonical_nodepair(-v[1], -v[0], original_graph)
+
 #Transform to dual graph, vertices = junctions, edges = old nodes
 #TODO: vertices should be not exactly junctions but junction+nodes since z-connections are legit
 
@@ -259,7 +279,7 @@ def create_dual_graph(original_graph:nx.MultiDiGraph):
     logging.info("Creating dual graph representation (nodes = canonical connections) using NetworkX...")
 
     # Iterate through each oriented node 'v' which acts as the junction
-    for v in original_graph.nodes:
+    for v in sorted(original_graph.nodes):
         # Determine the canonical edge C1 leading INTO node v
         predecessors = list(original_graph.successors(rc_node(v)))
         if not predecessors:
@@ -269,7 +289,7 @@ def create_dual_graph(original_graph:nx.MultiDiGraph):
             # Pick any predecessor 'u' to define the canonical incoming edge
             # Note: get_canonical_edge expects (from, to), so use (pred, v)
             u = rc_node(predecessors[0])
-            C1 = get_canonical_edge(u, v, original_graph)
+            C1 = get_canonical_nodepair(u, v, original_graph)
         canonical_edges_set.add(C1)
 
         # Determine the canonical edge C2 leading OUT FROM node v
@@ -281,7 +301,7 @@ def create_dual_graph(original_graph:nx.MultiDiGraph):
             # Pick any successor 'w' to define the canonical outgoing edge
             # Note: get_canonical_edge expects (from, to), so use (v, succ)
             w = successors[0]
-            C2 = get_canonical_edge(v, w, original_graph)
+            C2 = get_canonical_nodepair(v, w, original_graph)
         canonical_edges_set.add(C2)
 
         # Add the edge in the dual graph representing the transition through v
@@ -289,23 +309,22 @@ def create_dual_graph(original_graph:nx.MultiDiGraph):
         dual_graph.add_node(C1)
         dual_graph.add_node(C2)
         dual_graph.add_edge(C1, C2, original_node=v)
+        logging.debug(f"Added edge from {C1} to {C2} in dual graph, original node: {v}")
 
     logging.info(f"Total oriented nodes in original GFA structure: {len(original_graph.nodes)}")
     logging.info(f"Total unique canonical edges (dual nodes): {len(canonical_edges_set)}")
     logging.info(f"Total nodes in final dual graph: {dual_graph.number_of_nodes()}") # Should match set size
     logging.info(f"Total edges (connections through original nodes) in dual graph: {dual_graph.number_of_edges()}")
-
+    #logging.debug(f"Edges of dual graph: {list(dual_graph.edges())}")
     return dual_graph
 
 def is_tangle_vertex (C, tangle_set):
     return C[0] in tangle_set or C[1] in tangle_set
 
 
-#as for now, multiplities are for unoriented nodes
-#TODO: not supporting hairpins and oriented multiplicities
 
 #edge of multiplicity X -> X multiedges multiplicity 1
-def create_multi_dual_graph(dual_graph: nx.DiGraph, multiplicities: dict, tangle_nodes: set, boundary_nodes: set, G):
+def create_multi_dual_graph(dual_graph: nx.DiGraph, multiplicities: dict, tangle_nodes: set, boundary_nodes: dict, G):
     multi_dual_graph = nx.MultiDiGraph()
     logging.info("Creating multi-dual graph from dual graph and multiplicities...")
 
@@ -314,33 +333,38 @@ def create_multi_dual_graph(dual_graph: nx.DiGraph, multiplicities: dict, tangle
         if is_tangle_vertex(node, tangle_nodes):
             multi_dual_graph.add_node(node)
 
-#Dirty hacks to add start and sink
+    #adding start and sink nodes
+    incomings = set(boundary_nodes.keys())
+    outgoings = set(boundary_nodes.values())
     for b in boundary_nodes:
-        for orientation in [1, -1]:
-            id = b * orientation
-            for s in G.successors(id):
-                if s in tangle_nodes:
-                    fw_edge = get_canonical_edge(id, s, G)                                
-                    logging.debug(f"start {id} {s}")
-                    start = (0, id)
-                    multi_dual_graph.add_node(start)
-                    multi_dual_graph.add_edge(start, fw_edge, original_node=id, key = str(id) + "_"+ "0")
-                    break
-            
-            for s in G.predecessors(id):
-                if s in tangle_nodes:         
-                    bw_edge = get_canonical_edge(s, id, G)                
-                    logging.debug(f"end {s} {id}")
-                    end = (id, 0)
-                    multi_dual_graph.add_node(end)
-                    multi_dual_graph.add_edge(bw_edge, end, original_node=id, key = str(id) + "_"+ "0")
-                    break
+        incomings.add(-boundary_nodes[b])
+        outgoings.add(-b)
+    edges_added = 0
+
+    for b in boundary_nodes.keys():
+        for next_node in G.successors(b):
+            fw_edge = get_canonical_nodepair(b, next_node, G)                                
+            logging.debug(f"start {b} {next_node}")
+            start = (0, b)
+            multi_dual_graph.add_node(start)
+            multi_dual_graph.add_edge(start, fw_edge, original_node=b, key = f"{b}_{edges_added}")
+            edges_added += 1
+            break 
+    for b in boundary_nodes.values():
+        for next_node in G.predecessors(b):
+            bw_edge = get_canonical_nodepair(next_node, b, G)                                
+            logging.debug(f"start {next_node} {b}")
+            start = (b, 0)
+            multi_dual_graph.add_node(start)
+            multi_dual_graph.add_edge(bw_edge, start, original_node=b, key = f"{b}_{edges_added}")
+            edges_added += 1
+            break
+
 
     
     
     # Iterate through edges of the dual graph and add them to the multi-graph
     # based on the multiplicity of the original node they represent.
-    edges_added = 0
     for u, v, data in dual_graph.edges(data=True):
         if (not u in multi_dual_graph.nodes()) or (not v in multi_dual_graph.nodes()):
             continue
@@ -349,7 +373,7 @@ def create_multi_dual_graph(dual_graph: nx.DiGraph, multiplicities: dict, tangle
             logging.warning(f"Edge ({u}, {v}) in dual graph is missing 'original_node' attribute. Skipping.")
             continue
         
-        original_node_base = abs(original_node_oriented)
+        original_node_base = original_node_oriented #abs(original_node_oriented)
 
         multiplicity = multiplicities[original_node_base]
 
@@ -401,12 +425,8 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
 
     border_nodes_count = len(border_nodes)
     # Only 1-1 or 2-2 tangles for now
-    if border_nodes_count != 2 and border_nodes_count != 4:
-        logging.error(f"Only 1-1 or 2-2 tangles are supported")
-        return []
-    if len(start_vertices) != border_nodes_count or len(end_vertices) != border_nodes_count:
-        logging.error(f"Border vertices detection fail") 
-        return []
+    log_assert(border_nodes_count == 1 or border_nodes_count == 2, f"Only 1-1 or 2-2 tangles are supported")
+    log_assert(len(start_vertices) == border_nodes_count and len(end_vertices) == border_nodes_count, f"Start and end vertices count mismatch: {len(start_vertices)} vs {border_nodes_count} or {len(end_vertices)} vs {border_nodes_count}")
 
     #TODO: or just first in border_nodes?
     start_vertex_id = 0
@@ -415,11 +435,41 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
             start_vertex_id = i
     start_vertex = start_vertices[start_vertex_id]
     start_vertex_node = abs(start_vertex[1])
+    unreachable_edges = set()
     matching_end_vertex_node = border_nodes[start_vertex_node]
-    
-    reachable_verts = nx.descendants(multi_dual_graph, start_vertex)
-    # Add the start_node itself
-    reachable_verts.add(start_vertex)
+    for e in multi_dual_graph.edges(keys=True):
+        logging.debug(f"Edge {e}")
+
+    for _ in range (2):
+        reachable_verts = nx.descendants(multi_dual_graph, start_vertex)
+        # Add the start_node itself
+        reachable_verts.add(start_vertex)
+        unreachable_verts = set(multi_dual_graph.nodes()) - reachable_verts
+        unreachable_edges.clear()
+        for e in multi_dual_graph.edges(keys=True):
+            if e[0] in unreachable_verts:
+                unreachable_edges.add(e)
+                logging.info(e)
+
+        logging.info(f"Clearing unreachable edges: iter {_} {len(unreachable_edges)} present")
+        if len(unreachable_edges) == 0:
+            break
+        
+        for e in unreachable_edges:
+            logging.info(f"Reversing edge: {e}")
+            data = multi_dual_graph.get_edge_data(e[0], e[1], key=e[2])
+            logging.info(f"Data {data}")
+            multi_dual_graph.remove_edge(e[0], e[1], key = e[2])
+            if e[2][0] == '-':
+                new_key = e[2][1:]
+            else:
+                new_key = '-' + e[2]
+            multi_dual_graph.add_edge(get_canonical_rc_vertex(e[1], original_graph), get_canonical_rc_vertex(e[0], original_graph), original_node=-int(data['original_node']), key = new_key)
+
+    logging.debug(f"After transformation")
+    for e in multi_dual_graph.edges(keys=True):
+        logging.debug(f"Edge {e}")
+    log_assert(len(unreachable_edges) == 0, f"Unreachable edges are still present: {unreachable_edges}")
     reachable_subgraph = multi_dual_graph.subgraph(reachable_verts)
     reachable_end_vertices = []
     for v in reachable_subgraph.nodes():
@@ -483,6 +533,7 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
 
             # Move to next node
         logging.info(f"Randomized Eulerian path found with seed {seed} with {len(path)} nodes !")
+        logging.debug (f"{get_gaf_string(path)}")
         return path
     else:
         logging.error(f"Path not found from {start_vertex}")
@@ -617,7 +668,6 @@ def get_random_change(path, iter, temperature=1.0):
     #exit(9)
     return path
 
-#TODO: should be hashes for general graph
 def parse_gaf(gaf_file, interesting_nodes, filtered_file, quality_threshold=0):
     res = []
     if filtered_file:
@@ -644,6 +694,7 @@ def parse_gaf(gaf_file, interesting_nodes, filtered_file, quality_threshold=0):
                     node += char
             if node:
                 nodes.append(node)
+            #splitting for verkko graphalingment specifics
             nodes = [node.split('_')[0] for node in nodes if node]
             filtered_nodes = []
             for i, node in enumerate(nodes):
@@ -673,7 +724,9 @@ def parse_gaf(gaf_file, interesting_nodes, filtered_file, quality_threshold=0):
     return  res 
 
 #utig4-234 -> 234
-def parse_node_id(node_str):    
+def parse_node_id(node_str): 
+    if node_str in name_to_node_id:
+        return name_to_node_id[node_str]
     global last_enumerated_node
     parts = node_str.split('-')
     if len(parts) < 2 or not parts[1].isdigit():
@@ -693,6 +746,7 @@ def parse_node_id(node_str):
         node_id = last_enumerated_node
         logging.info(f"Assigned enumerated ID {node_id} to node {node_str}, utig4-0 special case")
     node_id_to_name[node_id] = node_str
+    name_to_node_id[node_str] = node_id
     return node_id
 
 def node_to_tangle(directed_graph, length_cutoff, target_node):
@@ -785,7 +839,8 @@ def log_assert(condition, message, logger=None):
             logger.error(error_msg)
         else:
             logging.error(error_msg)
-        raise AssertionError(error_msg)
+        exit(1)
+        #raise AssertionError(error_msg)
 
 def read_tangle_nodes(args, original_graph):
     """Read or construct tangle nodes."""
@@ -842,9 +897,10 @@ def coverage_from_graph(assembly_graph):
 def calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nodes):
     """Calculate or use provided median unique coverage."""
     min_b = 1000000
-    for b in boundary_nodes:
-        logging.info (f"{b} {cov[b]}")
-        min_b = min(min_b, cov[b])
+    all_boundary = list(boundary_nodes.keys()) + list(boundary_nodes.values())
+    for b in all_boundary:
+        logging.info (f"{b} {cov[abs(b)]}")
+        min_b = min(min_b, cov[abs(b)])
     if args.median_unique is not None:
         return [args.median_unique/GIVEN_MEDIAN_COVERAGE_VARIATION, args.median_unique * GIVEN_MEDIAN_COVERAGE_VARIATION]
     calculated_median = calculate_median_unique_coverage(nor_nodes, original_graph, cov, min_b)
@@ -914,17 +970,24 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, alignments, num_
     return best_path, best_score
 
 #Messy stuff excluded from main
-def generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original_graph, boundary_nodes):
-    """
-    Generate equations, nonzeros, and coverages for solving the integer system.
-    """
+def generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original_graph, boundary_nodes, directed = False):
     junction_equations = []    
     used = set()
     extended_tangle = tangle_nodes.copy()
+    #format: used ins to corresponding used outs
+    all_boundary_nodes = set()
     for b in boundary_nodes:
-        extended_tangle.add(abs(b))
-        extended_tangle.add(-abs(b))
-
+        all_boundary_nodes.add(abs(b))
+        all_boundary_nodes.add(-abs(b))
+        all_boundary_nodes.add(abs(boundary_nodes[b]))
+        all_boundary_nodes.add(-abs(boundary_nodes[b]))
+    extended_tangle.update(all_boundary_nodes)
+    canonic_name = {}
+    for node in extended_tangle:
+        if directed:
+            canonic_name[node] = node
+        else:
+            canonic_name[node] = abs(node)
     # Generate equations
     for from_node in extended_tangle:
         if from_node in used:
@@ -933,27 +996,32 @@ def generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original
         back_node = ""
         bad_extension = 0
         for to_node in original_graph.successors(from_node):
-            #TODO: remove this for hairpins
-            used.add(-to_node)
-            if abs(to_node) in extended_tangle:
-                arr[1].append(abs(to_node))
+            back_node = to_node
+            if not directed:
+                used.add(-to_node)
+            if to_node in extended_tangle:
+                arr[1].append(canonic_name[to_node])
             else:
                 bad_extension = to_node
                 break
-            back_node = to_node
-        if not (from_node in boundary_nodes) and bad_extension != 0:
-            logging.error(f"Somehow jumped over boundary nodes {from_node} {to_node} { boundary_nodes}")
-            
+           
+        if  bad_extension != 0:
+            if not (from_node in all_boundary_nodes):
+                logging.error(f"Somehow jumped over boundary nodes {from_node} {back_node} { boundary_nodes}")
+                exit()
+            else:
+                continue
         if back_node != "":
             for alt_start_node in original_graph.predecessors(back_node):
                 used.add(alt_start_node)
-                if abs(alt_start_node) in extended_tangle:
-                    arr[0].append(abs(alt_start_node))
+                if alt_start_node in extended_tangle:
+                    arr[0].append(canonic_name[alt_start_node])
                 else:
                     bad_extension = alt_start_node
                     break
         if bad_extension != 0:
-            logging.error(f"Somehow jumped over boundary nodes {alt_start_node} {to_node} { boundary_nodes}")
+            logging.error(f"Somehow jumped over boundary nodes (backwards) {alt_start_node} {bad_extension} { boundary_nodes}")
+            exit()
         junction_equations.append(arr)
 
     must_use_nodes = []
@@ -965,8 +1033,12 @@ def generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original
             must_use_nodes.append(node)
     boundary_values = {}
     for b in boundary_nodes:
-        boundary_values[abs(b)] = 1
+        boundary_values[b] = 1
+        boundary_values[boundary_nodes[b]] = 1
+        boundary_values[-b] = 0
+        boundary_values[-boundary_nodes[b]] = 0
         coverage[abs(b)] = float(cov[abs(b)]) 
+        coverage[abs(boundary_nodes[b])] = float(cov[abs(boundary_nodes[b])])
     return junction_equations, must_use_nodes, coverage, boundary_values
 
 
@@ -984,18 +1056,20 @@ def identify_boundary_nodes(args, original_graph, tangle_nodes):
                 boundary_nodes[node2] = node1
         return boundary_nodes
     else:
-        boundary_nodes = set()
+        out_boundary_nodes = set()
+        in_boundary_nodes = set()
         for first in original_graph.nodes:
             for second in original_graph.successors(first):
                 if first in tangle_nodes and second not in tangle_nodes:
-                    boundary_nodes.add(abs(second))
+                    out_boundary_nodes.add(second)
                 elif second in tangle_nodes and first not in tangle_nodes:
-                    boundary_nodes.add(abs(first))
-        log_assert(len(boundary_nodes) == 2, f"Autodetection works only for 1-1 tangles, detected boundary: {boundary_nodes}. Specify boundary node pairs manually")
+                    in_boundary_nodes.add(first)
+        log_assert(len(out_boundary_nodes) == 2 and len(in_boundary_nodes) == 2, f"Autodetection works only for 1-1 tangles, detected out_boundary: {out_boundary_nodes}, in_boundary: {in_boundary_nodes}. Specify boundary node pairs manually")
         res = {}
-        arr = list(boundary_nodes)
-        res[arr[0]] = arr[1]
-        res[arr[1]] = arr[0]
+        start = max(in_boundary_nodes)
+        end = max(out_boundary_nodes)
+        log_assert(abs(start) != abs(end), f"Start and end boundary nodes should be different, got {start} and {end}")
+        res[start] = end
         return res
 
 #Only UNIQUE_BORDER_LENGTH (=200K) for border unique nodes used
@@ -1098,7 +1172,7 @@ def main():
     #Shit is hidden here
     logging.info("Starting multiplicity counting...")
     #TODO: instead of a_values we just use coverage
-    equations, nonzeros, a_values, boundary_values = generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original_graph, boundary_nodes)
+    equations, nonzeros, a_values, boundary_values = generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original_graph, boundary_nodes, directed=True)
     #Failed to generate suboptimal solutions yet
     best_solution = solve_MIP(equations, nonzeros, boundary_values, a_values, median_unique_range)
     
@@ -1110,13 +1184,10 @@ def main():
     # Write multiplicities to CSV
     write_multiplicities(output_csv, best_solution, cov)
 
-    #Some implementations of pulp would give you 2.0 instead of 2
-    multiplicities = {node: int(round(value)) for node, value in best_solution.items()}
-    logging.info(f"Found multiplicities from MIP {multiplicities}")
     
     #Now all sequence is stored in edges, junctions are new vertices
     dual_graph = create_dual_graph(original_graph)
-    multi_graph = create_multi_dual_graph(dual_graph, multiplicities, tangle_nodes, boundary_nodes, original_graph)
+    multi_graph = create_multi_dual_graph(dual_graph, best_solution, tangle_nodes, boundary_nodes, original_graph)
     
     best_path, best_score = optimize_paths(multi_graph, boundary_nodes, original_graph, alignments, args.num_initial_paths, args.max_iterations, args.early_stopping_limit, automaton, pattern_counts)
     logging.info("Path optimizing finished.")
