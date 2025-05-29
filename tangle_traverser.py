@@ -405,20 +405,19 @@ def next_element(temp_graph, current):
     temp_graph.remove_edge(u, v, key)
     return ((u, v, int(key.split("_")[0])), v)
 
+
 #not_oriented border nodes, currently should be just one in one out
 #TODO: non-random starts based on most support?
 def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes, original_graph, seed):
     random.seed(seed)
-    #TODO: start from ("Tip, +-border_node"), would simplify code
     start_vertices = []
 
     end_vertices = []
-    for n in multi_dual_graph.nodes():
+    for n in border_nodes:
         #border tips encoding
-        if n[0] == 0:
-            start_vertices.append(n)
-        elif n[1] == 0:
-            end_vertices.append(n)
+        start_vertices.append((0, n))
+        end_vertices.append((n, 0))
+
     logging.info(f"Start and end vertices in the graph {start_vertices}, {end_vertices}")
     #adding fake links 
     
@@ -427,19 +426,15 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
     # Only 1-1 or 2-2 tangles for now
     log_assert(border_nodes_count == 1 or border_nodes_count == 2, f"Only 1-1 or 2-2 tangles are supported")
     log_assert(len(start_vertices) == border_nodes_count and len(end_vertices) == border_nodes_count, f"Start and end vertices count mismatch: {len(start_vertices)} vs {border_nodes_count} or {len(end_vertices)} vs {border_nodes_count}")
-
-    #TODO: or just first in border_nodes?
-    start_vertex_id = 0
-    for i in range(border_nodes_count):
-        if abs(start_vertices[i][1]) < abs(start_vertices[start_vertex_id][1]):
-            start_vertex_id = i
-    start_vertex = start_vertices[start_vertex_id]
-    start_vertex_node = abs(start_vertex[1])
-    unreachable_edges = set()
+    start_vertices.sort()
+    start_vertex = start_vertices[0]
+    start_vertex_node = start_vertex[1]
     matching_end_vertex_node = border_nodes[start_vertex_node]
+    matching_end_vertex = (matching_end_vertex_node, 0)
     for e in multi_dual_graph.edges(keys=True):
         logging.debug(f"Edge {e}")
 
+    unreachable_edges = set()
     for _ in range (2):
         reachable_verts = nx.descendants(multi_dual_graph, start_vertex)
         # Add the start_node itself
@@ -477,25 +472,13 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
             reachable_end_vertices.append(v)
 
     # If there are 4 border nodes, we need to find the correct end vertex and add the auxiliary connection
-    if border_nodes_count == 4:
-        log_assert(len(reachable_end_vertices) == 2, f"Wrong amount of reachable end vertices {start_vertex} {reachable_end_vertices} {len(reachable_end_vertices)} all end vertices {end_vertices}")
-        first_end_vertex = reachable_end_vertices[0]
-        last_end_vertex = reachable_end_vertices[1]
-        if abs(first_end_vertex[1]) == matching_end_vertex_node:
-            first_end_vertex = reachable_end_vertices[1]
-            last_end_vertex = reachable_end_vertices[0]
-            log_assert(abs(last_end_vertex[1]) != matching_end_vertex_node, f"End vertex detection fail {reachable_end_vertices} {matching_end_vertex_node}")
-        second_end_node = abs(last_end_vertex[0])
-        last_start_node = border_nodes[second_end_node]
-        for v in start_vertices:
-            if abs(v[1]) == last_start_node:
-                second_start_vertex = v
-                break        
-        multi_dual_graph.add_edge(first_end_vertex, second_start_vertex, original_node=0, key = "0_0")
-        node_id_to_name[0] = "AUX"
+    if border_nodes_count == 2:
+        aux_node_str = "AUX"
+        aux_int_id = parse_node_id(aux_node_str)  
+        multi_dual_graph.add_edge(matching_end_vertex, start_vertices[1], original_node=aux_int_id, key = f"{aux_int_id}_0")
 
 
-        logging.info(f"Added auxiliary edge {first_end_vertex} -> {second_start_vertex}")
+        logging.info(f"Added auxiliary edge {matching_end_vertex_node} -> {start_vertices[1]}")
         reachable_verts = nx.descendants(multi_dual_graph, start_vertex)
         # Add the start_node itself
         reachable_verts.add(start_vertex)
@@ -564,43 +547,64 @@ def get_gaf_string(path):
     return res
 
 
-def build_alignment_automaton(alignments):
-    automaton = ahocorasick.Automaton()
-    pattern_counts = {}
-    
-    # Add each alignment as a pattern to match
-    for idx, alignment in enumerate(alignments):
-        # Convert alignment to string for matching
-        logging.debug(f"Adding alignment {idx}: {alignment}")
-        pattern_str = ",".join(str(node) for node in alignment)
+class AlignmentScorer:
+    #TODO: deprioritize based on lengths and not just node counts
+    DEPRIORITIZE_RC_COEFFICIENT = 0.9
+    def __init__(self, alignments):
+        self.automaton = ahocorasick.Automaton()
+        self.pattern_counts = {}
         
-        # Store the pattern and its count
-        if pattern_str not in pattern_counts:
-            pattern_counts[pattern_str] = 0
-            # Add to automaton only once per unique pattern
-            automaton.add_word(pattern_str, pattern_str)
-        
-        pattern_counts[pattern_str] += 1
-    
-    # Finalize the automaton
-    automaton.make_automaton()
-    logging.debug(f"automaton keys {list(automaton.keys())}")
-    logging.info(f"Built automaton with {len(pattern_counts)} unique alignment patterns")
-    return automaton, pattern_counts
+        #from lexicographical minimum of (pattern, rc_pattern) to max
+        self.rc_patterns = {}
+        for idx, alignment in enumerate(alignments):
+            logging.debug(f"Adding alignment {idx}: {alignment}")
+            pattern_str = self.aln_to_string(alignment)
+            rc_nodes = [-n for n in alignment]
+            rc_nodes.reverse()
+            rc_pattern_str = self.aln_to_string(rc_nodes)
+            
+            #lexicographical minimum
+            #if ",".join(nodes) > ",".join(rc_nodes):
+             #   nodes = rc_nodes
 
-def score_corasick(automaton, pattern_count, path):
-    node_ids = [edge[2] for edge in path]
-    path_length = len(node_ids)
-    path_str = ",".join(str(node) for node in node_ids)
-    found = set()
-    for item in automaton.iter(path_str):
-        pattern = item[1]
-        found.add(pattern)
-        logging.debug(item)
-    score = 0
-    for item in found:
-        score += pattern_count.get(item)
-    return score
+            if pattern_str not in self.pattern_counts:
+                self.pattern_counts[pattern_str] = 0
+                self.pattern_counts[rc_pattern_str] = 0
+                self.automaton.add_word(pattern_str, pattern_str)
+                self.automaton.add_word(rc_pattern_str, rc_pattern_str)     
+                self.rc_patterns[pattern_str] = rc_pattern_str
+                self.rc_patterns[rc_pattern_str] = pattern_str   
+            self.pattern_counts[pattern_str] += 1
+            self.pattern_counts[rc_pattern_str] += 1
+
+        self.automaton.make_automaton()
+        logging.debug(f"automaton keys {list(self.automaton.keys())}")
+        logging.info(f"Built automaton with {len(self.pattern_counts)} unique alignment patterns")
+
+    def path_to_string(self, path):
+        return "," + ",".join(str(edge[2]) for edge in path) + ","
+    
+    def aln_to_string(self, aln):
+        return "," + ",".join(str(node) for node in aln) + ","
+    
+    def score_corasick(self, path):
+        node_ids = [edge[2] for edge in path]
+        path_length = len(node_ids)
+        path_str = self.path_to_string(path)
+        found = set()
+        for item in self.automaton.iter(path_str):
+            pattern = item[1]
+            found.add(pattern)
+        score = 0
+        for item in found:
+            #only looking for one of (pattern, rc_pattern)
+            if self.rc_patterns[item] in found:
+                score += self.pattern_counts[item] * self.DEPRIORITIZE_RC_COEFFICIENT
+                #TODO: possibly add paths length 1 for better deprioritization?
+                logging.debug(f"deprioritizing {item} because of rc")
+            else:
+                score += self.pattern_counts[item] * 2
+        return score
 
 def get_random_change(path, iter, temperature=1.0):
     """
@@ -668,7 +672,7 @@ def get_random_change(path, iter, temperature=1.0):
     #exit(9)
     return path
 
-def parse_gaf(gaf_file, interesting_nodes, filtered_file, quality_threshold=0):
+def parse_gaf(gaf_file, interesting_nodes, filtered_file, quality_threshold):
     res = []
     if filtered_file:
         out_file = open(filtered_file, 'w')
@@ -685,7 +689,7 @@ def parse_gaf(gaf_file, interesting_nodes, filtered_file, quality_threshold=0):
 
             nodes = []
             node = ""
-            for char in parts[5]:
+            for char in parts[5].strip():
                 if char in "<>":
                     if node:
                         nodes.append(node)
@@ -694,12 +698,7 @@ def parse_gaf(gaf_file, interesting_nodes, filtered_file, quality_threshold=0):
                     node += char
             if node:
                 nodes.append(node)
-            #splitting for verkko graphalingment specifics
-            nodes = [node.split('_')[0] for node in nodes if node]
-            filtered_nodes = []
-            for i, node in enumerate(nodes):
-                if i == 0 or node != nodes[i - 1]:
-                    filtered_nodes.append(node)
+            filtered_nodes = nodes.copy()
             nodes = []
             good = True
             for fnode in filtered_nodes:            
@@ -710,15 +709,9 @@ def parse_gaf(gaf_file, interesting_nodes, filtered_file, quality_threshold=0):
                 if fnode[0] == "<":
                     int_node = -int_node
                 nodes.append(int_node)   
-            rc_nodes = [-n for n in nodes]
-            rc_nodes.reverse()
-            #lexicographical minimum
-            #if ",".join(nodes) > ",".join(rc_nodes):
-             #   nodes = rc_nodes
-            if good and len(nodes) > 2:
+            #reverse_complement would be added in AlignmentScorer
+            if good and len(nodes) > 1:
                 res.append(nodes)
-                #TODO: use lexicographical minimum?
-                res.append(rc_nodes)
                 if filtered_file:
                     out_file.write(line)
     return  res 
@@ -912,22 +905,20 @@ def calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nod
         return res
 
 def write_multiplicities(output_file, solution, cov):
-    """Write solver solutions to the output file."""
-    try:
-        with open(output_file, 'w') as out_file:
-            out_file.write("node\tcoverage\tmult\n")
-            if len (solution) > 0:
-                for node_id in cov.keys():                    
-                    mult_value = solution.get(node_id, "X")
-                    cov_value = cov.get(node_id, "N/A")
-                    out_file.write(f"{node_id_to_name[node_id]}\t{cov_value}\t{mult_value}\n")
-        logging.info(f"Wrote multiplicity solutions to {output_file}")
-    except IOError as e:
-        logging.error(f"Failed to write output file {output_file}: {e}")
-        sys.exit(1)
+    with open(output_file, 'w') as out_file:
+        out_file.write("node\tcoverage\tmult\n")
+        if len (solution) > 0:
+            for node_id in cov.keys():                    
+                mult_value = solution.get(node_id, "X")
+                rev_mult_value = solution.get(-node_id, "X")
+                if mult_value != "X" and rev_mult_value != "X":
+                    mult_value = int(mult_value) + int(rev_mult_value)
+                cov_value = cov.get(node_id, "N/A")
+                out_file.write(f"{node_id_to_name[node_id]}\t{cov_value}\t{mult_value}\n")
+    logging.info(f"Wrote multiplicity solutions to {output_file}")
 
 # Update the optimize_paths function to use command-line options for default parameters
-def optimize_paths(multi_graph, boundary_nodes, original_graph, alignments, num_initial_paths, max_iterations, early_stopping_limit, automaton, pattern_counts):
+def optimize_paths(multi_graph, boundary_nodes, original_graph, num_initial_paths, max_iterations, early_stopping_limit, alignment_scorer: AlignmentScorer):
     """Optimize Eulerian paths."""
     best_path = None
     best_score = -1
@@ -941,7 +932,7 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, alignments, num_
             continue
         
         current_path = path
-        current_score = score_corasick(automaton, pattern_counts, current_path)
+        current_score = alignment_scorer.score_corasick(current_path)
         logging.info(f"Initial path score for seed {seed}: {current_score}.")
 
         iterations_since_improvement = 0
@@ -951,7 +942,7 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, alignments, num_
                 break
             
             new_path = get_random_change(current_path, seed * max_iterations + i)
-            new_score = score_corasick(automaton, pattern_counts, new_path)
+            new_score = alignment_scorer.score_corasick(new_path)
             if new_score > current_score:
                 logging.info(f"Improved score for seed {seed} at iteration {i}: {current_score} -> {new_score}.")
                 current_path = new_path
@@ -1043,7 +1034,6 @@ def generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original
 
 
 def identify_boundary_nodes(args, original_graph, tangle_nodes):
-    
     if args.boundary_nodes:
         boundary_nodes = {}
         for line in open (args.boundary_nodes):
@@ -1051,9 +1041,22 @@ def identify_boundary_nodes(args, original_graph, tangle_nodes):
             parts = line.strip().split()
             if len(parts) == 2:
                 node1 = parse_node_id(parts[0])
+                is_incoming = False
+                for next in original_graph.successors(node1):
+                    if next in tangle_nodes:
+                        is_incoming = True
+                        break
+                if not is_incoming:
+                    node1 = -node1
                 node2 = parse_node_id(parts[1])
+                is_outgoing = False
+                for prev in original_graph.predecessors(node2):
+                    if prev in tangle_nodes:
+                        is_outgoing = True
+                        break
+                if not is_outgoing:
+                    node2 = -node2
                 boundary_nodes[node1] = node2
-                boundary_nodes[node2] = node1
         return boundary_nodes
     else:
         out_boundary_nodes = set()
@@ -1072,15 +1075,8 @@ def identify_boundary_nodes(args, original_graph, tangle_nodes):
         res[start] = end
         return res
 
-#Only UNIQUE_BORDER_LENGTH (=200K) for border unique nodes used
+#Only UNIQUE_BORDER_LENGTH (=200K) suffix/prefix for border unique nodes used
 def output_path_fasta(best_path, original_graph, output_file):
-    """
-    Write the best path as a contig in FASTA format.
-
-    :param best_path: List of tuples representing the best path [(u, v, edge_id), ...].
-    :param original_graph: The original graph containing node sequences.
-    :param output_file: Path to the output FASTA file.
-    """
     with open(output_file, 'w') as fasta_file:
         contig_sequence = ""
         last_node = None
@@ -1115,7 +1111,6 @@ def output_path_fasta(best_path, original_graph, output_file):
     logging.info("Fasta output finished")
 
 def reverse_complement(sequence):
-    """Return the reverse complement of a DNA sequence."""
     complement = str.maketrans('ACGTacgt', 'TGCAtgca')
     return sequence.translate(complement)[::-1]
 
@@ -1158,7 +1153,10 @@ def main():
     boundary_nodes = identify_boundary_nodes(args, original_graph, tangle_nodes)
 
     used_nodes = nor_nodes.copy()
-    used_nodes.update(boundary_nodes)
+    for b in boundary_nodes:
+        used_nodes.add(abs(b))
+        used_nodes.add(abs(boundary_nodes[b]))
+   
     if args.coverage_file:
         cov = read_coverage_file(args.coverage_file)
     else:
@@ -1168,7 +1166,7 @@ def main():
     median_unique = math.sqrt(median_unique_range[0] * median_unique_range[1])
     filtered_alignment_file = os.path.join(args.outdir, f"{args.basename}.q{args.quality_threshold}.used_alignments.gaf")
     alignments = parse_gaf(args.alignment, used_nodes, filtered_alignment_file, args.quality_threshold)
-    automaton, pattern_counts = build_alignment_automaton(alignments)
+    alignment_scorer = AlignmentScorer(alignments)
     #Shit is hidden here
     logging.info("Starting multiplicity counting...")
     #TODO: instead of a_values we just use coverage
@@ -1189,7 +1187,7 @@ def main():
     dual_graph = create_dual_graph(original_graph)
     multi_graph = create_multi_dual_graph(dual_graph, best_solution, tangle_nodes, boundary_nodes, original_graph)
     
-    best_path, best_score = optimize_paths(multi_graph, boundary_nodes, original_graph, alignments, args.num_initial_paths, args.max_iterations, args.early_stopping_limit, automaton, pattern_counts)
+    best_path, best_score = optimize_paths(multi_graph, boundary_nodes, original_graph, args.num_initial_paths, args.max_iterations, args.early_stopping_limit, alignment_scorer)
     logging.info("Path optimizing finished.")
     if best_path:
         best_path_str = get_gaf_string(best_path)
