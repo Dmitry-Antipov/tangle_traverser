@@ -359,9 +359,6 @@ def create_multi_dual_graph(dual_graph: nx.DiGraph, multiplicities: dict, tangle
             multi_dual_graph.add_edge(bw_edge, start, original_node=b, key = f"{b}_{edges_added}")
             edges_added += 1
             break
-
-
-    
     
     # Iterate through edges of the dual graph and add them to the multi-graph
     # based on the multiplicity of the original node they represent.
@@ -444,16 +441,16 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
         for e in multi_dual_graph.edges(keys=True):
             if e[0] in unreachable_verts:
                 unreachable_edges.add(e)
-                logging.info(e)
+                logging.debug(e)
 
-        logging.info(f"Clearing unreachable edges: iter {_} {len(unreachable_edges)} present")
+        logging.info(f"Clearing unreachable edges: iteration {_} {len(unreachable_edges)} present")
         if len(unreachable_edges) == 0:
             break
         
         for e in unreachable_edges:
-            logging.info(f"Reversing edge: {e}")
+            logging.debug(f"Reversing edge: {e}")
             data = multi_dual_graph.get_edge_data(e[0], e[1], key=e[2])
-            logging.info(f"Data {data}")
+            logging.debug(f"Data {data}")
             multi_dual_graph.remove_edge(e[0], e[1], key = e[2])
             if e[2][0] == '-':
                 new_key = e[2][1:]
@@ -1038,6 +1035,7 @@ def identify_boundary_nodes(args, original_graph, tangle_nodes):
         boundary_nodes = {}
         for line in open (args.boundary_nodes):
             # Parse the line and extract boundary node pairs
+            #map incoming->matching outgoing
             parts = line.strip().split()
             if len(parts) == 2:
                 node1 = parse_node_id(parts[0])
