@@ -603,14 +603,23 @@ class AlignmentScorer:
                 score += self.pattern_counts[item] * 2
         return score
 
-def get_random_change(path, iter, temperature=1.0):
+def rc_path(path, rc_vertex_map):
+    new_path = []
+    for edge in path:
+        u, v, edge_id = edge
+        new_u = rc_vertex_map[u]
+        new_v = rc_vertex_map[v]
+        new_path.append((new_v, new_u, -edge_id))
+    new_path.reverse()
+    return new_path
+
+def get_random_change(path, iter, rc_vertex_map):
     """
     Finds two non-overlapping intervals in the Eulerian path that start and end at the same vertices
-    and swaps them to create a new path.
+    and swaps them to create a new path or inverts a random self-rc interval
        
     :param path: List of edges representing the Eulerian path.
     :param iter: Iteration number for random seed
-    :param temperature: Not used, need to understand local/global changes better
     :return: Modified path with swapped intervals
     """
     
@@ -639,6 +648,14 @@ def get_random_change(path, iter, temperature=1.0):
         
         start_node = path[i][0]
         end_node = path[j][1]
+        #We can do inversion
+        if rc_vertex_map[start_node] == end_node and iter % 2 == 0:
+            # Invert the interval from i to j
+            new_path = path[:i] + rc_path(path[i:j + 1], rc_vertex_map) + path[j + 1:]
+            logging.debug(f"{_ + 1} attempts to generate random inversion")
+            logging.debug(f"{get_gaf_string(new_path)}")
+            return new_path
+        
         # Find k where path[k][0] == start_node and k > j
         k_candidates = [k for k in start_positions.get(start_node, []) if k > j]
         if not k_candidates:
@@ -920,7 +937,9 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, num_initial_path
     best_path = None
     best_score = -1
     logging.info(f"Starting optimization with {num_initial_paths} initial paths, max {max_iterations} iterations per path.")
-    
+    rc_vertex_map = {}
+    for vertex in multi_graph.nodes():
+        rc_vertex_map[vertex] = get_canonical_rc_vertex(vertex, original_graph)
     for seed in range(num_initial_paths):
         logging.info(f"Generating initial path with seed {seed}.")
         path = get_traversing_eulerian_path(multi_graph, boundary_nodes, original_graph, seed)
@@ -938,7 +957,7 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, num_initial_path
                 logging.info(f"Early stopping for seed {seed} on iteration {i} after {iterations_since_improvement} iterations without improvement.")
                 break
             
-            new_path = get_random_change(current_path, seed * max_iterations + i)
+            new_path = get_random_change(current_path, seed * max_iterations + i, rc_vertex_map)
             new_score = alignment_scorer.score_corasick(new_path)
             if new_score > current_score:
                 logging.info(f"Improved score for seed {seed} at iteration {i}: {current_score} -> {new_score}.")
