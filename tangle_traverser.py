@@ -650,6 +650,17 @@ def get_random_change(path, iter, rc_vertex_map):
         end_node = path[j][1]
         #We can do inversion
         if rc_vertex_map[start_node] == end_node and iter % 2 == 0:
+            # not allowing to invert AUX node            
+            if "AUX" in name_to_node_id:
+                forbidden = False
+                aux_id = name_to_node_id["AUX"]
+                for ind in range(i, j + 1):
+                    if path[ind][2] == aux_id:
+                        forbidden = True
+                        break
+                if forbidden:
+                    logging.debug(f"Skipping inversion due to AUX node presence between {i} and {j}")
+                    continue
             # Invert the interval from i to j
             new_path = path[:i] + rc_path(path[i:j + 1], rc_vertex_map) + path[j + 1:]
             logging.debug(f"{_ + 1} attempts to generate random inversion")
@@ -1134,8 +1145,11 @@ def reverse_complement(sequence):
     
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Solve for integer multiplicities in a GFA tangle graph based on coverage.")
-    parser.add_argument("--gfa", required=True, dest="gfa_file", help="Path to the GFA file.")
-    parser.add_argument("--alignment", required=True, help="Path to a file with graphaligner alignment")
+    parser.add_argument("--gfa", required=False, dest="gfa_file", help="Path to the GFA file.")
+    parser.add_argument("--alignment", required=False, help="Path to a file with graphaligner alignment")
+    parser.add_argument("--outdir", required=True, type=str, help="Output directory for all result files (will be created if it doesn't exist)")
+    parser.add_argument("--verkko-output", required=False, type=str, help="Path to dir with verkko results. Ovewrites --gfa, --alignment, --coverage-file with standart paths")
+    
     parser.add_argument("--coverage-file", help="Path to a file with node coverages (node-id coverage). If not provided, coverage will be filled from the GFA file.")
     parser.add_argument("--median-unique", type=float, help="Median coverage for unique nodes.")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Set the logging level (default: INFO).")
@@ -1148,12 +1162,20 @@ def parse_arguments():
     parser.add_argument("--early-stopping-limit", type=int, default=15000, help="Early stopping limit for optimization (default: 15000).")
     #TODO: for quality 0 use random of alignments with highest score?
     parser.add_argument("--quality-threshold", type=int, default=20, help="Alignments with quality less than this will be filtered out, default 20")
-    parser.add_argument("--outdir", required=True, type=str, help="Output directory for all result files (will be created if it doesn't exist)")
     parser.add_argument("--basename", required=False, default="traversal", type=str, help="Basename for most of the output files, default `traversal`")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.verkko_output is None and (args.gfa_file is None or args.alignment is None):
+        logging.error("Either --verkko-output OR both --gfa and --alignment are required options")
+        return
+    if args.verkko_output: 
+        args.coverage_file = os.path.join(args.verkko_output, "2-processGraph", "unitig-unrolled-hifi-resolved.ont-coverage.csv")
+        args.gfa = os.path.join(args.verkko_output, "2-processGraph", "unitig-unrolled-hifi-resolved.gfa")
+        args.alignment = os.path.join(args.verkko_output, "3-align", "alns-ont.gaf")
+    return args
 
 def main():    
     args = parse_arguments()
+    
     os.makedirs(args.outdir, exist_ok=True)
 
     setup_logging(args)
