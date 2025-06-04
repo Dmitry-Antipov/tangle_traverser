@@ -1,6 +1,7 @@
 Simple tangle traverser, generates "not terrible" traversal through repetitive genomic tangle that somehow matches coverage and the read alignment
 For help run ./tangle_traverer.py --help
 
+Requires pulp, ahocorasick, networkx, statistics, logging   python libraries.
 ## Usage
 
 ```bash
