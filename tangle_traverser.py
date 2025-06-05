@@ -1105,38 +1105,62 @@ def identify_boundary_nodes(args, original_graph, tangle_nodes):
 
 #Only UNIQUE_BORDER_LENGTH (=200K) suffix/prefix for border unique nodes used
 #TODO: AUX split
-def output_path_fasta(best_path, original_graph, output_file):
-    with open(output_file, 'w') as fasta_file:
-        contig_sequence = ""
-        last_node = None
-        for i in range (len(best_path)):
-            edge_id = best_path[i][2]
-            node_id = abs(edge_id)
-            orientation = edge_id > 0
+def output_path(best_path, original_graph, output_fasta, output_gaf):
 
-            # Retrieve the sequence from the graph
-            node_sequence = original_graph.nodes[node_id]['sequence']
-            if node_sequence == "*":
-                logging.error("Provided noseq assembly graph, no fasta output possible")
-                return
-            if not orientation:
-                # Reverse complement the sequence if orientation is negative
-                node_sequence = reverse_complement(node_sequence)
+    aux = -1
+    if "AUX" in name_to_node_id:
+        aux_id = name_to_node_id["AUX"]
+        for i in range(len(best_path)):
+            if abs(best_path[i][2]) == aux_id:
+                aux = i
+                logging.debug(f"Found AUX at position {aux}")
+                break
+    if aux > 0:
+        paths = [best_path[:aux - 1], best_path[aux + 1:]]
+    else:
+        paths = [best_path]
 
-            if i == 0:
-                overlap = max (0, len(node_sequence) - UNIQUE_BORDER_LENGTH)                
-            else:                
-                overlap = original_graph.get_edge_data(last_node, edge_id)['overlap']
+    gaf_file = open(output_gaf, 'w')
+    count = 0
+    for path in paths:
+        gaf_file.write(f"traversal_{count}\t{get_gaf_string(path)}\n")
+        count += 1
+    
+    with open(output_fasta, 'w') as fasta_file:
+        count = 0
+        for path in paths:
 
-            if i == len(best_path) - 1:                            
-                contig_sequence += node_sequence[overlap:min(len(node_sequence),UNIQUE_BORDER_LENGTH)]
-            else:
-                contig_sequence += node_sequence[overlap:]
-            last_node = edge_id
+            contig_sequence = ""
+            last_node = None
+            for i in range(len(path)):
+                edge_id = path[i][2]
+                node_id = abs(edge_id)
+                orientation = edge_id > 0
 
-        # Write the contig to the FASTA file
-        fasta_file.write(">contig\n")
-        fasta_file.write(f"{contig_sequence}\n")
+                # Retrieve the sequence from the graph
+                node_sequence = original_graph.nodes[node_id]['sequence']
+                if node_sequence == "*":
+                    logging.error("Provided noseq assembly graph, no fasta output possible")
+                    return
+                if not orientation:
+                    # Reverse complement the sequence if orientation is negative
+                    node_sequence = reverse_complement(node_sequence)
+
+                if i == 0:
+                    overlap = max (0, len(node_sequence) - UNIQUE_BORDER_LENGTH)                
+                else:                
+                    overlap = original_graph.get_edge_data(last_node, edge_id)['overlap']
+
+                if i == len(best_path) - 1:                            
+                    contig_sequence += node_sequence[overlap:min(len(node_sequence),UNIQUE_BORDER_LENGTH)]
+                else:
+                    contig_sequence += node_sequence[overlap:]
+                last_node = edge_id
+
+            # Write the contig to the FASTA file
+            fasta_file.write(f">traversal_{count}\n")
+            fasta_file.write(f"{contig_sequence}\n")
+            count += 1
     logging.info("Fasta output finished")
 
 def reverse_complement(sequence):
@@ -1237,14 +1261,9 @@ def main():
         logging.info(f"Found traversal\t{best_path_str}")
         
         # Output FASTA file
-        logging.info(f"Writing best path to {output_fasta}")
-        output_path_fasta(best_path, original_graph, output_fasta)
-        
-        # Output GAF file
-        logging.info(f"Writing best path to {output_gaf}")
-        with open(output_gaf, 'w') as outf:
-            outf.write(f"tangle\t{best_path_str}\n")
-    
+        logging.info(f"Writing best path to {output_fasta} and gaf to {output_gaf}")
+        output_path(best_path, original_graph, output_fasta, output_gaf)
+
 
 if __name__ == "__main__":
     main()
