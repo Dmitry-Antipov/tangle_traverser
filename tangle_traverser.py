@@ -431,6 +431,21 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
     for e in multi_dual_graph.edges(keys=True):
         logging.debug(f"Edge {e}")
 
+    # If there are 4 border nodes, we need to find the correct end vertex and add the auxiliary connection
+    if border_nodes_count == 2:
+        aux_node_str = "AUX"
+        aux_int_id = parse_node_id(aux_node_str)  
+        multi_dual_graph.add_edge(matching_end_vertex, start_vertices[1], original_node=aux_int_id, key = f"{aux_int_id}_0")
+
+
+        logging.info(f"Added auxiliary edge {matching_end_vertex_node} -> {start_vertices[1]}")
+        reachable_verts = nx.descendants(multi_dual_graph, start_vertex)
+        # Add the start_node itself
+        reachable_verts.add(start_vertex)
+
+        # Recreate reachable subgraph after aux edge added
+        reachable_subgraph = multi_dual_graph.subgraph(reachable_verts)
+
     unreachable_edges = set()
     for _ in range (2):
         reachable_verts = nx.descendants(multi_dual_graph, start_vertex)
@@ -467,21 +482,6 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
     for v in reachable_subgraph.nodes():
         if v in end_vertices:
             reachable_end_vertices.append(v)
-
-    # If there are 4 border nodes, we need to find the correct end vertex and add the auxiliary connection
-    if border_nodes_count == 2:
-        aux_node_str = "AUX"
-        aux_int_id = parse_node_id(aux_node_str)  
-        multi_dual_graph.add_edge(matching_end_vertex, start_vertices[1], original_node=aux_int_id, key = f"{aux_int_id}_0")
-
-
-        logging.info(f"Added auxiliary edge {matching_end_vertex_node} -> {start_vertices[1]}")
-        reachable_verts = nx.descendants(multi_dual_graph, start_vertex)
-        # Add the start_node itself
-        reachable_verts.add(start_vertex)
-
-        # Recreate reachable subgraph after aux edge added
-        reachable_subgraph = multi_dual_graph.subgraph(reachable_verts)
 
     # Eulerian path generation, manual to randomize
     if nx.has_eulerian_path(reachable_subgraph, start_vertex):
@@ -1104,6 +1104,7 @@ def identify_boundary_nodes(args, original_graph, tangle_nodes):
         return res
 
 #Only UNIQUE_BORDER_LENGTH (=200K) suffix/prefix for border unique nodes used
+#TODO: AUX split
 def output_path_fasta(best_path, original_graph, output_file):
     with open(output_file, 'w') as fasta_file:
         contig_sequence = ""
@@ -1164,12 +1165,14 @@ def parse_arguments():
     parser.add_argument("--quality-threshold", type=int, default=20, help="Alignments with quality less than this will be filtered out, default 20")
     parser.add_argument("--basename", required=False, default="traversal", type=str, help="Basename for most of the output files, default `traversal`")
     args = parser.parse_args()
-    if args.verkko_output is None and (args.gfa_file is None or args.alignment is None):
-        logging.error("Either --verkko-output OR both --gfa and --alignment are required options")
+    if not args.verkko_output  and (not args.gfa_file  or not args.alignment ):
+        #logging not initialized yet
+        sys.stderr.write("Either --verkko-output OR both --gfa and --alignment are required options\n")
         return
+
     if args.verkko_output: 
         args.coverage_file = os.path.join(args.verkko_output, "2-processGraph", "unitig-unrolled-hifi-resolved.ont-coverage.csv")
-        args.gfa = os.path.join(args.verkko_output, "2-processGraph", "unitig-unrolled-hifi-resolved.gfa")
+        args.gfa_file = os.path.join(args.verkko_output, "2-processGraph", "unitig-unrolled-hifi-resolved.gfa")
         args.alignment = os.path.join(args.verkko_output, "3-align", "alns-ont.gaf")
     return args
 
@@ -1179,8 +1182,9 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
 
     setup_logging(args)
+    logging.debug(f"args: {args}")
     logging.info("Reading files...")
-
+    
     # Create output directory if it doesn't exist
 
     #TODO: save it somewhere, some connections added while parsing    
