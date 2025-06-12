@@ -20,6 +20,8 @@ OR
 - Tangle should be specified with either one internal node (`--tangle-node utig4-267`) or a file with complete list of internal tangle nodes one by line (`--tangle-file nodes.list`)
 - `--output`: Output directory for all result files (will be created if it doesn't exist)
 
+Be sure that you use the same graph for all the files (gfa, alignment, coverage, tangle and border nodes) -  HiFi graph (or --verkko-output) will not work with tangle nodes provided with respect to the final ONT resolved (utig4- in verkko case) graph.
+
 ### Example:
 ```bash
 ./tangle_traverser.py --gfa assembly.gfa --alignment reads.gaf --output results_dir --tangle-node utig4-267 --quality-threshold 20
