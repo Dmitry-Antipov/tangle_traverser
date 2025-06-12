@@ -27,8 +27,11 @@ OR
 
 ### Verkko's final graph coverage fix
 In verkko up to (and including )v2.2.1 coverage of the short nodes in tangles in final graph (assembly.homopolymer-compressed.gfa) is deeply flawed. To get the updated coverage file we suggest to run additional scripts
+
 `./verkko_coverage_fix/utig4_to_utig1.py <assembly_folder> > utig42utig1.gaf`
+
 `./verkko_coverage_fix/utig4_coverage_updater.py utig42utig1.gaf <assembly_folder>/assembly.homopolymer-compressed.noseq.gfa <assembly_folder>/2-processGraph/unitig-unrolled-hifi-resolved.ont-coverage.csv > utig4_upt.ont-coverage.csv`
+
 and then pass `utig4_upt.ont-coverage.csv` as `--coverage-file` in main script.
 
 Alternatively you can find how utig4- nodes match to the utig1- graph in utig42utig1.gaf and run tangle_traverser.py on the same tangle in hifi-only graph.
