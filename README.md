@@ -22,6 +22,14 @@ OR
 
 Be sure that you use the same graph for all the files (gfa, alignment, coverage, tangle and border nodes) -  HiFi graph (or --verkko-output) will not work with tangle nodes provided with respect to the final ONT resolved (utig4- in verkko case) graph.
 
+Tangle traversal does no scaffolding. So, when running on tangles with two genomic paths you should provide incoming and outgoing boundary node pairs with --boundary-nodes boundary_file.tsv
+
+File should be tab separated, in format:
+incoming_hap1_node  outgoing_hap1_node
+incoming_hap2_node  outgoing_hap2_node
+
+Tangle_traverer does not support tangles with more than 2 traversing paths (i.e. most of the rDNA tangles)
+
 ### Example:
 ```bash
 ./tangle_traverser.py --gfa assembly.gfa --alignment reads.gaf --output results_dir --tangle-node utig4-267 --quality-threshold 20
