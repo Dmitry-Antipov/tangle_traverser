@@ -223,7 +223,10 @@ def calculate_median_unique_coverage(nor_nodes, original_graph, cov, min_b):
         if is_plus_unique and is_minus_unique:
             if node_id in cov and cov[node_id] < min_b * GIVEN_MEDIAN_COVERAGE_VARIATION:
                 coverage = float(cov[node_id])
-                unique_coverages.append(coverage)
+                if coverage == 0:
+                    logging.info(f"Node {node_id} has zero coverage ,excluding from unique coverage calculation.")
+                    continue
+                unique_coverages.append([coverage, original_graph.nodes[node_id].get('length', 0), node_id])
                 unique_node_ids.add(node_id)
                 logging.debug(f"Node {node_id} is unique. Coverage: {coverage}")
             elif cov[node_id] >= min_b * GIVEN_MEDIAN_COVERAGE_VARIATION:
@@ -238,7 +241,15 @@ def calculate_median_unique_coverage(nor_nodes, original_graph, cov, min_b):
         logging.warning("No structurally unique nodes found in the tangle to calculate median coverage.")
         return None
     unique_coverages.sort()
-    median_cov = statistics.median(unique_coverages)
+    total_len = 0
+    for coverage, length, node_id in unique_coverages:
+        total_len += length
+    cur_len = 0
+    for ind in range(len(unique_coverages)):
+        cur_len += unique_coverages[ind][1]
+        if cur_len * 2 >= total_len:
+            median_cov = unique_coverages[ind][0]
+            break
     unique_debug = []
     #TODO: global mapping to restore original names
     for u in unique_node_ids:
@@ -447,7 +458,7 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
         reachable_subgraph = multi_dual_graph.subgraph(reachable_verts)
 
     unreachable_edges = set()
-    for _ in range (2):
+    for _ in range (100):
         reachable_verts = nx.descendants(multi_dual_graph, start_vertex)
         # Add the start_node itself
         reachable_verts.add(start_vertex)
@@ -741,6 +752,77 @@ def parse_gaf(gaf_file, interesting_nodes, filtered_file, quality_threshold):
                     out_file.write(line)
     return  res 
 
+def get_synonymous_changes(path, alignment_scorer: AlignmentScorer):
+    #some copy-paste
+    path_length = len(path)    
+    # Pre-build index of matching start/end positions for faster lookup
+    start_positions = {}
+    end_positions = {}
+    final_score = alignment_scorer.score_corasick(path)
+    for idx, (u, v, _) in enumerate(path):
+        if u not in start_positions:
+            start_positions[u] = []
+        start_positions[u].append(idx)
+        
+        if v not in end_positions:
+            end_positions[v] = []
+        end_positions[v].append(idx)
+    swappable_intervals = set()
+    for start_v in start_positions:
+        for end_v in end_positions:
+            for first_start_ind in range(len(start_positions[start_v])-1):
+                for second_start_ind in range(first_start_ind + 1, len(start_positions[start_v])):
+                    for first_end_ind in range(len(end_positions[end_v]) - 1):
+                        for second_end_ind in range(first_end_ind + 1, len(end_positions[end_v])):
+                            #valid swap
+                            start_path_first_ind = start_positions[start_v][first_start_ind]
+                            end_path_first_ind = end_positions[end_v][first_end_ind]
+                            start_path_second_ind = start_positions[start_v][second_start_ind]
+                            end_path_second_ind = end_positions[end_v][second_end_ind]
+                            #for an interval start and end can be same - one node paths. But different intervals should not overlap
+                            if end_path_first_ind < start_path_first_ind or end_path_second_ind < start_path_second_ind or start_path_second_ind <= end_path_first_ind:                                
+                                continue
+                            first_gaf_fragment = get_gaf_path(path[start_path_first_ind:end_path_first_ind+1])
+                            second_gaf_fragment = get_gaf_path(path[start_path_second_ind:end_path_second_ind+1])
+                            logging.debug(first_gaf_fragment)
+                            logging.debug(second_gaf_fragment)
+                            if first_gaf_fragment == second_gaf_fragment:
+                                logging.debug(f"Found synonymous change: {first_gaf_fragment} positions {start_path_first_ind}-{end_path_first_ind} and {start_path_second_ind}-{end_path_second_ind}, not checking")
+                                continue
+                            new_path = (
+                            path[:start_path_first_ind]
+                                + path[start_path_second_ind:end_path_second_ind + 1]
+                                + path[end_path_first_ind + 1:start_path_second_ind]
+                                + path[start_path_first_ind:end_path_first_ind + 1]
+                                + path[end_path_second_ind + 1:]
+                            )
+                            log_assert((len(new_path) == len(path)), f"New path length does not match original path len = {len(path)} indices {start_path_first_ind}-{end_path_first_ind} and {start_path_second_ind}-{end_path_second_ind}")
+                            new_score = alignment_scorer.score_corasick(new_path)
+                            log_assert(new_score <= final_score, "New path score is greater than original path score")
+                            logging.debug(f"New path score: {new_score}, original path score: {final_score} positions {start_path_first_ind}-{end_path_first_ind} and {start_path_second_ind}-{end_path_second_ind}")
+                            if new_score < final_score:
+                                logging.debug(f"Swap {start_path_first_ind}-{end_path_first_ind} with {start_path_second_ind}-{end_path_second_ind} decreases score, continuing")
+                            elif new_score == final_score:
+
+                                left_shift = 0
+                                right_shift = 0
+                                while first_gaf_fragment[left_shift] == second_gaf_fragment[left_shift]:
+                                    left_shift += 1
+                                while first_gaf_fragment[-right_shift-1] == second_gaf_fragment[-right_shift-1]:
+                                    right_shift += 1
+                                logging.debug(f"Swap {start_path_first_ind}-{end_path_first_ind} with {start_path_second_ind}-{end_path_second_ind} does not change score")
+                                logging.debug(f"Tuned intervals {start_path_first_ind + left_shift}-{end_path_first_ind - right_shift} with {start_path_second_ind + left_shift}-{end_path_second_ind - right_shift}")
+                                swappable_intervals.add((start_path_first_ind + left_shift, end_path_first_ind - right_shift, start_path_second_ind + left_shift, end_path_second_ind - right_shift))
+                                logging.debug(f"Edge paths are {first_gaf_fragment} and {second_gaf_fragment}")
+    #TODO: check for possible inversions
+    if len(swappable_intervals) > 0:
+        logging.warning(f"Total {len(swappable_intervals)} path modifications with the same score found!")
+        for first_start, first_end, second_start, second_end in swappable_intervals:
+            logging.info(f"Swappable interval: {first_start}-{first_end} with {second_start}-{second_end}")
+            logging.info(f"Subpaths {get_gaf_string(path[first_start:first_end + 1])} and {get_gaf_string(path[second_start:second_end + 1])}")
+    else:
+        logging.info("No equivalent paths found")
+
 #utig4-234 -> 234
 def parse_node_id(node_str): 
     if node_str in name_to_node_id:
@@ -812,9 +894,38 @@ def clean_tips (tangle_nodes, directed_graph):
 
 def setup_logging(args):
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
-    # Exclude date, include time, function name, and line number
-    log_format = '%(asctime)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s'
+    # Configure logging with runtime from program start
+    start_time = time.time()
+    
+    class RuntimeFormatter(logging.Formatter):
+        def __init__(self, fmt=None, datefmt=None, start_time=None):
+            super().__init__(fmt, datefmt)
+            self.start_time = start_time
+            
+        def format(self, record):
+            record.runtime = time.time() - self.start_time
+            return super().format(record)
+        
     datefmt = '%H:%M:%S'
+
+    def format_runtime(seconds):
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        seconds = int(seconds % 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    
+    class RuntimeFormatter(logging.Formatter):
+        def __init__(self, fmt=None, datefmt=None, start_time=None):
+            super().__init__(fmt, datefmt)
+            self.start_time = start_time
+            
+        def format(self, record):
+            runtime_seconds = time.time() - self.start_time
+            record.runtime = format_runtime(runtime_seconds)
+            return super().format(record)
+    
+    log_format = '%(runtime)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s'
+    formatter = RuntimeFormatter(log_format, datefmt)
         
     # Always log to both file and console
     log_file = os.path.join(args.outdir, f"{args.basename}.log")
@@ -822,19 +933,15 @@ def setup_logging(args):
     # Configure root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
-    
-    # Clear any existing handlers
-    root_logger.handlers = []
-    
     # File handler
     file_handler = logging.FileHandler(log_file, mode='w')
-    file_handler.setFormatter(logging.Formatter(log_format, datefmt=datefmt))
+    file_handler.setFormatter(RuntimeFormatter(log_format, datefmt=datefmt, start_time=start_time))
     file_handler.setLevel(log_level)
     root_logger.addHandler(file_handler)
     
     # Console handler
     console_handler = logging.StreamHandler(sys.stderr)
-    console_handler.setFormatter(logging.Formatter(log_format, datefmt=datefmt))
+    console_handler.setFormatter(RuntimeFormatter(log_format, datefmt=datefmt, start_time=start_time))
     console_handler.setLevel(log_level)
     root_logger.addHandler(console_handler)
     
@@ -1259,6 +1366,7 @@ def main():
     if best_path:
         best_path_str = get_gaf_string(best_path)
         logging.info(f"Found traversal\t{best_path_str}")
+        get_synonymous_changes(best_path, alignment_scorer)
         
         # Output FASTA file
         logging.info(f"Writing best path to {output_fasta} and gaf to {output_gaf}")
