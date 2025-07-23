@@ -557,7 +557,11 @@ def get_gaf_string(path):
 
 class AlignmentScorer:
     #TODO: deprioritize based on lengths and not just node counts
+    #With othervise equivaltent solution we belive more in one with smaller inversion
     DEPRIORITIZE_RC_COEFFICIENT = 0.9
+
+    #TODO:
+    #add coefficient to balance path lengths for two-haplotype tangles
     def __init__(self, alignments):
         self.automaton = ahocorasick.Automaton()
         self.pattern_counts = {}
@@ -752,7 +756,7 @@ def parse_gaf(gaf_file, interesting_nodes, filtered_file, quality_threshold):
                     out_file.write(line)
     return  res 
 
-def get_synonymous_changes(path, alignment_scorer: AlignmentScorer):
+def get_synonymous_changes(path, rc_vertex_map, alignment_scorer: AlignmentScorer):
     #some copy-paste
     path_length = len(path)    
     # Pre-build index of matching start/end positions for faster lookup
@@ -814,12 +818,42 @@ def get_synonymous_changes(path, alignment_scorer: AlignmentScorer):
                                 logging.debug(f"Tuned intervals {start_path_first_ind + left_shift}-{end_path_first_ind - right_shift} with {start_path_second_ind + left_shift}-{end_path_second_ind - right_shift}")
                                 swappable_intervals.add((start_path_first_ind + left_shift, end_path_first_ind - right_shift, start_path_second_ind + left_shift, end_path_second_ind - right_shift))
                                 logging.debug(f"Edge paths are {first_gaf_fragment} and {second_gaf_fragment}")
+    invertable_intervals = set()
+    for start_v in start_positions:
+        rc_start_v = rc_vertex_map[start_v]
+        if not rc_start_v in end_positions:
+            continue
+        for start_path_ind in start_positions[start_v]:
+            for end_path_ind in end_positions[rc_start_v]:
+                #check if we can invert a self-rc interval
+                if start_path_ind < end_path_ind:
+                    #invert the interval
+                    inverted_path = rc_path(path[start_path_ind:end_path_ind + 1], rc_vertex_map)
+                    if get_gaf_string(inverted_path) == get_gaf_string(path[start_path_ind:end_path_ind + 1]):
+                        logging.debug(f"Found equivalent inverted path: {get_gaf_string(inverted_path)}")
+                        continue
+                    new_path = path[:start_path_ind] + rc_path(path[start_path_ind:end_path_ind + 1], rc_vertex_map) + path[end_path_ind + 1:]
+                    new_score = alignment_scorer.score_corasick(new_path)
+                    log_assert(new_score <= final_score, "New path score is greater than original path score")
+                    logging.debug(f"New path score: {new_score}, original path score: {final_score} positions {start_path_ind}-{end_path_ind}")
+                    if new_score < final_score:
+                        logging.debug(f"Inversion {start_path_ind}-{end_path_ind} decreases score, continuing")
+                    elif new_score == final_score:
+                        invertable_intervals.add((start_path_ind, end_path_ind))
+                        logging.debug(f"Inversion {start_path_ind}-{end_path_ind} does not change score")
+                        logging.debug(f"Edge paths are {get_gaf_string(path[start_path_ind:end_path_ind + 1])}")
     #TODO: check for possible inversions
-    if len(swappable_intervals) > 0:
-        logging.warning(f"Total {len(swappable_intervals)} path modifications with the same score found!")
-        for first_start, first_end, second_start, second_end in swappable_intervals:
-            logging.info(f"Swappable interval: {first_start}-{first_end} with {second_start}-{second_end}")
-            logging.info(f"Subpaths {get_gaf_string(path[first_start:first_end + 1])} and {get_gaf_string(path[second_start:second_end + 1])}")
+    if len(invertable_intervals) + len(swappable_intervals) > 0:
+        if len(swappable_intervals) > 0:
+            logging.warning(f"Total {len(swappable_intervals)} path swaps with the same score found!")
+            for first_start, first_end, second_start, second_end in swappable_intervals:
+                logging.info(f"Swappable interval: {first_start}-{first_end} with {second_start}-{second_end}")
+                logging.info(f"Subpaths {get_gaf_string(path[first_start:first_end + 1])} and {get_gaf_string(path[second_start:second_end + 1])}")
+        if len(invertable_intervals) > 0:
+            logging.warning(f"Total {len(invertable_intervals)} path inversions with the same score found!")
+            for start, end in invertable_intervals:
+                logging.info(f"Invertable interval: {start}-{end}")
+                logging.info(f"Subpath {get_gaf_string(path[start:end + 1])}")
     else:
         logging.info("No equivalent paths found")
 
@@ -1366,7 +1400,11 @@ def main():
     if best_path:
         best_path_str = get_gaf_string(best_path)
         logging.info(f"Found traversal\t{best_path_str}")
-        get_synonymous_changes(best_path, alignment_scorer)
+
+        rc_vertex_map = {}
+        for vertex in multi_graph.nodes():
+            rc_vertex_map[vertex] = get_canonical_rc_vertex(vertex, original_graph)
+        get_synonymous_changes(best_path, rc_vertex_map,alignment_scorer)
         
         # Output FASTA file
         logging.info(f"Writing best path to {output_fasta} and gaf to {output_gaf}")
