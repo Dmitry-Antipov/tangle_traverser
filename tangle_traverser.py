@@ -26,6 +26,19 @@ GIVEN_MEDIAN_COVERAGE_VARIATION = 1.2
 #Add this length (max) from the nodes neighboring tangle to fasta for better alignment
 UNIQUE_BORDER_LENGTH = 200000
 
+def node_id_to_name_safe(node_id):
+    """Safely convert node ID to name, handling cases where name might not exist"""
+    if node_id > 0:
+        prefix = ">"
+    else:
+        prefix = "<"
+    node_id = abs(node_id)
+    if node_id in node_id_to_name:
+        return prefix + node_id_to_name[node_id]
+    else:
+        logging.error(f"Node ID {node_id} not found in name mapping.")
+        exit(1)
+
 #Multiplicities detection magic is here
 #TODO: length-based weights?
 def solve_MIP(equations, nonzeros, boundary_values, coverages, unique_coverage_range):
@@ -43,8 +56,8 @@ def solve_MIP(equations, nonzeros, boundary_values, coverages, unique_coverage_r
             for j in eq[ind]:
                 abs_keys.add(abs(j))
     for key in abs_keys:
-        log_assert(key in keys and -key in keys, f"One of the keys {key} or {-key} is not in equations {equations}")
-        log_assert(key in coverages , f"Key {key} is not in coverages")
+        log_assert(key in keys and -key in keys, f"One of the keys {node_id_to_name_safe(key)} or {node_id_to_name_safe(-key)} is not in equations {equations}")
+        log_assert(key in coverages , f"Key {node_id_to_name_safe(key)} is not in coverages")
 
     #TODO: we can check for hairpin presence just here.
     x_vars = {i: pulp.LpVariable(f"x_{i}", cat="Integer") for i in keys}
@@ -90,7 +103,9 @@ def solve_MIP(equations, nonzeros, boundary_values, coverages, unique_coverage_r
         logging.warning("MIP did not find an optimal solution.")
     result = {i: int(pulp.value(x_vars[i])) for i in keys}
     
-    logging.info(f"Found multiplicities from MIP {result}")
+    # Convert result to use node names for logging
+    result_with_names = {node_id_to_name_safe(i): result[i] for i in result}
+    logging.info(f"Found multiplicities from MIP {result_with_names}")
     score = pulp.value(objective)  
     detected_coverage = 1/pulp.value(inv_unique_coverage)
     logging.info (f"Unique coverage for the best MIP solution {detected_coverage}, solution score {score}")
@@ -185,12 +200,12 @@ def parse_gfa(file_path):
                                 overlap_sizes.append(original_graph[n1][n2].get('overlap', 0))
                                 min_overlap = min(overlap_sizes) if overlap_sizes else 0
                                 original_graph.add_edge(start_node, n2, overlap=min_overlap)
-                                logging.debug(f"Non-transitive junction! Adding {start_node} -> {n2}, overlap {min_overlap}")
+                                logging.debug(f"Non-transitive junction! Adding {node_id_to_name_safe(start_node)} -> {node_id_to_name_safe(n2)}, overlap {min_overlap}")
                                 non_transitive_junctions += 1
                                 overlap_counted = True
                                 break
                         if not overlap_counted:
-                            logging.warning(f"Non-transitive junction failed to get overlap. Adding {start_node} -> {n2}, overlap 0")
+                            logging.warning(f"Non-transitive junction failed to get overlap. Adding {node_id_to_name_safe(start_node)} -> {node_id_to_name_safe(n2)}, overlap 0")
                             original_graph.add_edge(start_node, n2, overlap=0)
     logging.info(f"Tuned non-transitive junctions: {non_transitive_junctions}")
     return original_graph
@@ -224,17 +239,17 @@ def calculate_median_unique_coverage(nor_nodes, original_graph, cov, min_b):
             if node_id in cov and cov[node_id] < min_b * GIVEN_MEDIAN_COVERAGE_VARIATION:
                 coverage = float(cov[node_id])
                 if coverage == 0:
-                    logging.info(f"Node {node_id} has zero coverage ,excluding from unique coverage calculation.")
+                    logging.info(f"Node {node_id_to_name_safe(node_id)} has zero coverage ,excluding from unique coverage calculation.")
                     continue
                 unique_coverages.append([coverage, original_graph.nodes[node_id].get('length', 0), node_id])
                 unique_node_ids.add(node_id)
-                logging.debug(f"Node {node_id} is unique. Coverage: {coverage}")
+                logging.debug(f"Node {node_id_to_name_safe(node_id)} is unique. Coverage: {coverage}")
             elif cov[node_id] >= min_b * GIVEN_MEDIAN_COVERAGE_VARIATION:
-                logging.debug(f"Node {node_id} looks structurally unique but coverage {cov[node_id]} is higher than borders {min_b} * variation {GIVEN_MEDIAN_COVERAGE_VARIATION}")
+                logging.debug(f"Node {node_id_to_name_safe(node_id)} looks structurally unique but coverage {cov[node_id]} is higher than borders {min_b} * variation {GIVEN_MEDIAN_COVERAGE_VARIATION}")
             else:
-                logging.warning(f"Structurally unique node {node_id} not found in coverage file.")
+                logging.warning(f"Structurally unique node {node_id_to_name_safe(node_id)} not found in coverage file.")
         #else:
-            #logging.debug(f"Node {node_id} is not structurally unique (+ unique: {is_plus_unique}, - unique: {is_minus_unique}).")
+            #logging.debug(f"Node {node_id_to_name_safe(node_id)} is not structurally unique (+ unique: {is_plus_unique}, - unique: {is_minus_unique}).")
 
 
     if not unique_coverages:
@@ -272,9 +287,9 @@ def get_canonical_nodepair(oriented_node1, oriented_node2, original_graph):
         if rc_node(node) < from_node:
             from_node = rc_node(node)
     if not (to_node in original_graph.successors(from_node)):
-        logging.warning(f"Irregular junction {from_node} {to_node} {oriented_node1} {oriented_node2}")
-        logging.warning(f"{from_node} -> {list(original_graph.successors(from_node))}")
-        logging.warning(f"{rc_node(to_node)} -> {list(original_graph.successors(rc_node(to_node)))}")        
+        logging.warning(f"Irregular junction {node_id_to_name_safe(from_node)} {node_id_to_name_safe(to_node)} {node_id_to_name_safe(oriented_node1)} {node_id_to_name_safe(oriented_node2)}")
+        logging.warning(f"{node_id_to_name_safe(from_node)} -> {[node_id_to_name_safe(n) for n in original_graph.successors(from_node)]}")
+        logging.warning(f"{node_id_to_name_safe(rc_node(to_node))} -> {[node_id_to_name_safe(n) for n in original_graph.successors(rc_node(to_node))]}")        
     return (from_node, to_node)
 
 def get_canonical_rc_vertex(v, original_graph):
@@ -320,7 +335,7 @@ def create_dual_graph(original_graph:nx.MultiDiGraph):
         dual_graph.add_node(C1)
         dual_graph.add_node(C2)
         dual_graph.add_edge(C1, C2, original_node=v)
-        logging.debug(f"Added edge from {C1} to {C2} in dual graph, original node: {v}")
+        logging.debug(f"Added edge from {C1} to {C2} in dual graph, original node: {node_id_to_name_safe(v)}")
 
     logging.info(f"Total oriented nodes in original GFA structure: {len(original_graph.nodes)}")
     logging.info(f"Total unique canonical edges (dual nodes): {len(canonical_edges_set)}")
@@ -355,7 +370,7 @@ def create_multi_dual_graph(dual_graph: nx.DiGraph, multiplicities: dict, tangle
     for b in boundary_nodes.keys():
         for next_node in G.successors(b):
             fw_edge = get_canonical_nodepair(b, next_node, G)                                
-            logging.debug(f"start {b} {next_node}")
+            logging.debug(f"start {node_id_to_name_safe(b)} {node_id_to_name_safe(next_node)}")
             start = (0, b)
             multi_dual_graph.add_node(start)
             multi_dual_graph.add_edge(start, fw_edge, original_node=b, key = f"{b}_{edges_added}")
@@ -364,7 +379,7 @@ def create_multi_dual_graph(dual_graph: nx.DiGraph, multiplicities: dict, tangle
     for b in boundary_nodes.values():
         for next_node in G.predecessors(b):
             bw_edge = get_canonical_nodepair(next_node, b, G)                                
-            logging.debug(f"start {next_node} {b}")
+            logging.debug(f"start {node_id_to_name_safe(next_node)} {node_id_to_name_safe(b)}")
             start = (b, 0)
             multi_dual_graph.add_node(start)
             multi_dual_graph.add_edge(bw_edge, start, original_node=b, key = f"{b}_{edges_added}")
@@ -386,10 +401,10 @@ def create_multi_dual_graph(dual_graph: nx.DiGraph, multiplicities: dict, tangle
         multiplicity = multiplicities[original_node_base]
 
         if multiplicity < 0:
-            logging.error(f"Negative multiplicity {multiplicity} for node {original_node_base}. Treating as 0 for edge ({u} -> {v}).")
+            logging.error(f"Negative multiplicity {multiplicity} for node {node_id_to_name_safe(original_node_base)}. Treating as 0 for edge ({u} -> {v}).")
             exit(0)
         # Add the edge 'multiplicity' times to the multi-dual graph
-        logging.debug(f"Adding {multiplicity} multiedges for {original_node_oriented}")
+        logging.debug(f"Adding {multiplicity} multiedges for {node_id_to_name_safe(original_node_oriented)}")
         for _ in range(multiplicity):
             # Add edge with the original node attribute
             multi_dual_graph.add_edge(u, v, original_node=original_node_oriented, key = str(original_node_oriented) + "_"+str(edges_added))
@@ -449,7 +464,7 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
         multi_dual_graph.add_edge(matching_end_vertex, start_vertices[1], original_node=aux_int_id, key = f"{aux_int_id}_0")
 
 
-        logging.info(f"Added auxiliary edge {matching_end_vertex_node} -> {start_vertices[1]}")
+        logging.info(f"Added auxiliary edge {node_id_to_name_safe(matching_end_vertex_node)} -> {start_vertices[1]}")
         reachable_verts = nx.descendants(multi_dual_graph, start_vertex)
         # Add the start_node itself
         reachable_verts.add(start_vertex)
@@ -540,11 +555,7 @@ def get_gaf_path(path):
     res = []
     for i in range(len(path)):
         edge = path[i][2]
-        #TODO: should be from hashes to original names        
-        if edge > 0:            
-            node = ">" + node_id_to_name[abs(edge)]
-        else:
-            node = "<" + node_id_to_name[abs(edge)]
+        node = node_id_to_name_safe(edge)      
         res.append(node)
     return res
 
@@ -903,7 +914,7 @@ def node_to_tangle(directed_graph, length_cutoff, target_node):
     connected_component = nx.node_connected_component(indirect_graph, target_node)
     logging.info(f"Total {len(connected_component)} tangle nodes in connected component")
     for u in connected_component:
-        logging.debug(f"Tangle node {abs(u)}")
+        logging.debug(f"Tangle node {node_id_to_name_safe(abs(u))}")
     rc_component = nx.node_connected_component(indirect_graph, -target_node)
     connected_component.update(rc_component)
     
@@ -920,7 +931,7 @@ def clean_tips (tangle_nodes, directed_graph):
                 changed = True
                 to_erase.append(n)
         for n in to_erase:
-            logging.info(f"Cleaning {n} from tangle")
+            logging.info(f"Cleaning {node_id_to_name_safe(n)} from tangle")
             tangle_nodes.remove(n)
             directed_graph.remove_node(n)
             
@@ -1058,7 +1069,7 @@ def verify_coverage(cov, original_graph):
     graph_nodes = set(original_graph.nodes())
     for node_id in cov.keys():
         if abs(node_id) not in graph_nodes:
-            logging.error(f"Node {node_id} from coverage file is not present in the assembly graph, please check that coverage corresponds to the same graph")
+            logging.error(f"Node {node_id_to_name_safe(node_id)} from coverage file is not present in the assembly graph, please check that coverage corresponds to the same graph")
             exit(1)    
     missing_length = 0
     total_length = 0
@@ -1068,7 +1079,7 @@ def verify_coverage(cov, original_graph):
             continue
 
         if node_id not in cov:
-            logging.info(f"Node {node_id} from assembly graph is not present in the coverage file")
+            logging.info(f"Node {node_id_to_name_safe(node_id)} from assembly graph is not present in the coverage file")
             missing_length += original_graph.nodes[node_id].get('length', 0)
         else:
             nodes.append([original_graph.nodes[node_id].get('length', 0), cov[node_id]])
@@ -1099,7 +1110,7 @@ def calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nod
     min_b = 1000000
     all_boundary = list(boundary_nodes.keys()) + list(boundary_nodes.values())
     for b in all_boundary:
-        logging.info (f"{b} {cov[abs(b)]}")
+        logging.info (f"{node_id_to_name_safe(b)} {cov[abs(b)]}")
         min_b = min(min_b, cov[abs(b)])
     if args.median_unique is not None:
         return [args.median_unique/GIVEN_MEDIAN_COVERAGE_VARIATION, args.median_unique * GIVEN_MEDIAN_COVERAGE_VARIATION]
@@ -1207,7 +1218,7 @@ def generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original
            
         if  bad_extension != 0:
             if not (from_node in all_boundary_nodes):
-                logging.error(f"Somehow jumped over boundary nodes {from_node} {back_node} { boundary_nodes}")
+                logging.error(f"Somehow jumped over boundary nodes {node_id_to_name_safe(from_node)} {node_id_to_name_safe(back_node)} { boundary_nodes}")
                 exit()
             else:
                 continue
@@ -1220,7 +1231,7 @@ def generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original
                     bad_extension = alt_start_node
                     break
         if bad_extension != 0:
-            logging.error(f"Somehow jumped over boundary nodes (backwards) {alt_start_node} {bad_extension} { boundary_nodes}")
+            logging.error(f"Somehow jumped over boundary nodes (backwards) {node_id_to_name_safe(alt_start_node)} {node_id_to_name_safe(bad_extension)} { boundary_nodes}")
             exit()
         junction_equations.append(arr)
 
@@ -1228,7 +1239,7 @@ def generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original
     coverage = {}
     for node in nor_nodes:        
         coverage[node] = float(cov[node]) #/ median_unique
-        logging.debug(f"Coverage of {node} : {coverage[node]}")
+        logging.debug(f"Coverage of {node_id_to_name_safe(node)} : {coverage[node]}")
         if coverage[node] / median_unique >= 0.5:
             must_use_nodes.append(node)
     boundary_values = {}
@@ -1277,11 +1288,11 @@ def identify_boundary_nodes(args, original_graph, tangle_nodes):
                     out_boundary_nodes.add(second)
                 elif second in tangle_nodes and first not in tangle_nodes:
                     in_boundary_nodes.add(first)
-        log_assert(len(out_boundary_nodes) == 2 and len(in_boundary_nodes) == 2, f"Autodetection works only for 1-1 tangles, detected out_boundary: {out_boundary_nodes}, in_boundary: {in_boundary_nodes}. Specify boundary node pairs manually")
+        log_assert(len(out_boundary_nodes) == 2 and len(in_boundary_nodes) == 2, f"Autodetection works only for 1-1 tangles, detected out_boundary: {[node_id_to_name_safe(n) for n in out_boundary_nodes]}, in_boundary: {[node_id_to_name_safe(n) for n in in_boundary_nodes]}. Specify boundary node pairs manually")
         res = {}
         start = max(in_boundary_nodes)
         end = max(out_boundary_nodes)
-        log_assert(abs(start) != abs(end), f"Start and end boundary nodes should be different, got {start} and {end}")
+        log_assert(abs(start) != abs(end), f"Start and end boundary nodes should be different, got {node_id_to_name_safe(start)} and {node_id_to_name_safe(end)}")
         res[start] = end
         return res
 
