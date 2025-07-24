@@ -1031,6 +1031,7 @@ def read_tangle_nodes(args, original_graph):
 def read_coverage_file(coverage_file):
     """node_id\tnode_cov"""
     logging.info(f"Reading coverage from {coverage_file}")
+
     cov = {}
     with open(coverage_file, 'r') as f:
         for line in f:
@@ -1052,6 +1053,46 @@ def coverage_from_graph(assembly_graph):
             logging.error("Coverage file not provided, failed to get coverage from the assembly graph gfa")
             exit()
     return cov
+
+def verify_coverage(cov, original_graph):
+    graph_nodes = set(original_graph.nodes())
+    for node_id in cov.keys():
+        if abs(node_id) not in graph_nodes:
+            logging.error(f"Node {node_id} from coverage file is not present in the assembly graph, please check that coverage corresponds to the same graph")
+            exit(1)    
+    missing_length = 0
+    total_length = 0
+    nodes = []
+    for node_id in graph_nodes:
+        if node_id < 0:
+            continue
+
+        if node_id not in cov:
+            logging.info(f"Node {node_id} from assembly graph is not present in the coverage file")
+            missing_length += original_graph.nodes[node_id].get('length', 0)
+        else:
+            nodes.append([original_graph.nodes[node_id].get('length', 0), cov[node_id]])
+        total_length += original_graph.nodes[node_id].get('length', 0)
+        
+    if missing_length > 0:
+        if missing_length * 10 >= total_length:
+            logging.error(f"Too many missing nodes in coverage file: {missing_length} out of {total_length}, please check that coverage corresponds to the same graph")
+            exit(1)
+    else:
+        nodes.sort(key=lambda x: x[0])
+        cur_len = 0
+        estimated_unique_coverage = 0
+        for length, coverage in nodes:
+            cur_len += length
+            if cur_len * 2 >= total_length:
+                estimated_unique_coverage = coverage
+                break
+
+        logging.info(f"Total length of missing nodes in whole graph: {missing_length} out of {total_length}, median coverage {estimated_unique_coverage} will be used")
+        for node_id in graph_nodes:
+            if node_id not in cov:
+                cov[node_id] = estimated_unique_coverage
+    
 
 def calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nodes):
     """Calculate or use provided median unique coverage."""
@@ -1354,7 +1395,16 @@ def main():
 
     #TODO: save it somewhere, some connections added while parsing    
     original_graph = parse_gfa(args.gfa_file)
+    if args.coverage_file:
+        cov = read_coverage_file(args.coverage_file)
+    else:
+        cov = coverage_from_graph(original_graph)
+    #verifying that coverage matches the graph
+    #for rare cases coverage may be missing for some nodes, will update with median then 
+    verify_coverage(cov, original_graph)
+
     tangle_nodes = read_tangle_nodes(args, original_graph)    
+    #TODO: Do we really need it?
     clean_tips(tangle_nodes, original_graph)
     nor_nodes = {abs(node) for node in tangle_nodes}
     
@@ -1365,11 +1415,7 @@ def main():
         used_nodes.add(abs(b))
         used_nodes.add(abs(boundary_nodes[b]))
    
-    if args.coverage_file:
-        cov = read_coverage_file(args.coverage_file)
-    else:
-        cov = coverage_from_graph(original_graph)
-    #TODO: some edges can be missing, fill them with ??? (longest node coverage?)
+
     median_unique_range = calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nodes)    
     median_unique = math.sqrt(median_unique_range[0] * median_unique_range[1])
     filtered_alignment_file = os.path.join(args.outdir, f"{args.basename}.q{args.quality_threshold}.used_alignments.gaf")
