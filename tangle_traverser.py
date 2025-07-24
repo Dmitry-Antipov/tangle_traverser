@@ -13,6 +13,7 @@ import pstats
 import time
 import os
 import ahocorasick
+import dataclasses
 
 # Add a global map for node ID to string node names
 #only positive ids (unoriented)
@@ -418,6 +419,14 @@ def create_multi_dual_graph(dual_graph: nx.DiGraph, multiplicities: dict, tangle
     return multi_dual_graph
 
 #Supplementary for Euler path search
+
+@dataclasses.dataclass
+class EdgeDescription:
+    source: int
+    target: int
+    original_node: int
+
+
 def next_element(temp_graph, current):
     edges = list(temp_graph.out_edges(current, data=True, keys=True))    
     # Randomly choose the next edge based on seed
@@ -426,7 +435,7 @@ def next_element(temp_graph, current):
     # Extract edge data
     u, v, key, data = chosen_edge
     temp_graph.remove_edge(u, v, key)
-    return ((u, v, int(key.split("_")[0])), v)
+    return (EdgeDescription(u, v, int(key.split("_")[0])), v)
 
 
 #not_oriented border nodes, currently should be just one in one out
@@ -526,9 +535,9 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
                 # Get all outgoing edges, can just work further
             else:
                 for i in range (0, len(path)):
-                    if temp_graph.out_degree(path[i][0]) > 0:
+                    if temp_graph.out_degree(path[i].source) > 0:
                         add_cycle = []
-                        cycle_current = path[i][0]
+                        cycle_current = path[i].source
                         while temp_graph.out_degree(cycle_current) > 0:
                             next_el, cycle_current = next_element(temp_graph, cycle_current)
                             add_cycle.append(next_el)
@@ -554,7 +563,7 @@ def get_traversing_eulerian_path(multi_dual_graph: nx.MultiDiGraph, border_nodes
 def get_gaf_path(path):
     res = []
     for i in range(len(path)):
-        edge = path[i][2]
+        edge = path[i].original_node
         node = node_id_to_name_safe(edge)      
         res.append(node)
     return res
@@ -605,14 +614,12 @@ class AlignmentScorer:
         logging.info(f"Built automaton with {len(self.pattern_counts)} unique alignment patterns")
 
     def path_to_string(self, path):
-        return "," + ",".join(str(edge[2]) for edge in path) + ","
+        return "," + ",".join(str(edge.original_node) for edge in path) + ","
     
     def aln_to_string(self, aln):
         return "," + ",".join(str(node) for node in aln) + ","
     
     def score_corasick(self, path):
-        node_ids = [edge[2] for edge in path]
-        path_length = len(node_ids)
         path_str = self.path_to_string(path)
         found = set()
         for item in self.automaton.iter(path_str):
@@ -656,24 +663,24 @@ def get_random_change(path, iter, rc_vertex_map):
     start_positions = {}
     end_positions = {}
     
-    for idx, (u, v, _) in enumerate(path):
-        if u not in start_positions:
-            start_positions[u] = []
-        start_positions[u].append(idx)
-        
-        if v not in end_positions:
-            end_positions[v] = []
-        end_positions[v].append(idx)
-    
+    for idx, edge_descr in enumerate(path):
+        if edge_descr.source not in start_positions:
+            start_positions[edge_descr.source] = []
+        start_positions[edge_descr.source].append(idx)
+
+        if edge_descr.target not in end_positions:
+            end_positions[edge_descr.target] = []
+        end_positions[edge_descr.target].append(idx)
+
     max_tries = 10000  # Adjust based on path length
     
     for _ in range(max_tries):
         # Select i and j such that i < j
         i = random.randint(0, path_length - 3)
         j = random.randint(i + 1,  path_length - 2) 
-        
-        start_node = path[i][0]
-        end_node = path[j][1]
+
+        start_node = path[i].source
+        end_node = path[j].target
         #We can do inversion
         if rc_vertex_map[start_node] == end_node and iter % 2 == 0:
             # not allowing to invert AUX node            
@@ -681,7 +688,7 @@ def get_random_change(path, iter, rc_vertex_map):
                 forbidden = False
                 aux_id = name_to_node_id["AUX"]
                 for ind in range(i, j + 1):
-                    if path[ind][2] == aux_id:
+                    if path[ind].original_node == aux_id:
                         forbidden = True
                         break
                 if forbidden:
@@ -692,15 +699,15 @@ def get_random_change(path, iter, rc_vertex_map):
             logging.debug(f"{_ + 1} attempts to generate random inversion")
             logging.debug(f"{get_gaf_string(new_path)}")
             return new_path
-        
-        # Find k where path[k][0] == start_node and k > j
+
+        # Find k where path[k].source == start_node and k > j
         k_candidates = [k for k in start_positions.get(start_node, []) if k > j]
         if not k_candidates:
             continue
         # Choose k randomly without temperature weighting
         k = random.choice(k_candidates)
 
-        # Find l such that path[l][1] == end_node and l > k
+        # Find l such that path[l].target == end_node and l > k
         l_candidates = [l for l in end_positions.get(end_node, []) if l > k]
         if not l_candidates:
             continue
@@ -774,14 +781,15 @@ def get_synonymous_changes(path, rc_vertex_map, alignment_scorer: AlignmentScore
     start_positions = {}
     end_positions = {}
     final_score = alignment_scorer.score_corasick(path)
-    for idx, (u, v, _) in enumerate(path):
-        if u not in start_positions:
-            start_positions[u] = []
-        start_positions[u].append(idx)
-        
-        if v not in end_positions:
-            end_positions[v] = []
-        end_positions[v].append(idx)
+    for idx, edge_descr in enumerate(path):
+        if edge_descr.source not in start_positions:
+            start_positions[edge_descr.source] = []
+        start_positions[edge_descr.source].append(idx)
+
+        if edge_descr.target not in end_positions:
+            end_positions[edge_descr.target] = []
+        end_positions[edge_descr.target].append(idx)
+
     swappable_intervals = set()
     for start_v in start_positions:
         for end_v in end_positions:
@@ -1304,7 +1312,7 @@ def output_path(best_path, original_graph, output_fasta, output_gaf):
     if "AUX" in name_to_node_id:
         aux_id = name_to_node_id["AUX"]
         for i in range(len(best_path)):
-            if abs(best_path[i][2]) == aux_id:
+            if abs(best_path[i].original_node) == aux_id:
                 aux = i
                 logging.debug(f"Found AUX at position {aux}")
                 break
@@ -1326,7 +1334,7 @@ def output_path(best_path, original_graph, output_fasta, output_gaf):
             contig_sequence = ""
             last_node = None
             for i in range(len(path)):
-                edge_id = path[i][2]
+                edge_id = path[i].original_node
                 node_id = abs(edge_id)
                 orientation = edge_id > 0
 
