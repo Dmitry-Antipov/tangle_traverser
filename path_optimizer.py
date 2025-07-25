@@ -15,6 +15,7 @@ class PathOptimizer:
         self.start_vertex = start_vertex
         self.seed = seed
         self.node_mapper = node_mapper
+        #map reverse complement vertices
         self.rc_vertex_map = rc_vertex_map
         self.traversing_path = self.generate_random_eulerian_path()
 
@@ -104,73 +105,74 @@ class PathOptimizer:
         Finds two non-overlapping intervals in the Eulerian path that start and end at the same vertices
         and swaps them to create a new path or inverts a random self-rc interval
         
-        :param path: List of edges representing the Eulerian path.
         :param iter: Iteration number for random seed
         :return: Modified path with swapped intervals
         """
         
         random.seed(iter)
-        path_length = len(self.traversing_path)
-        
+        path_length = len(self.traversing_path)            
         self.update_start_end_positions()
-
-        # Pre-build index of matching start/end positions for faster lookup
-
-
         max_tries = 10000  # Adjust based on path length
         
         for _ in range(max_tries):
             # Select i and j such that i < j
             i = random.randint(0, path_length - 3)
-            j = random.randint(i + 1,  path_length - 2) 
-
-            start_vertex = self.traversing_path[i].source
-            end_vertex = self.traversing_path[j].target
-            #We can do inversion
-            if self.rc_vertex_map[start_vertex] == end_vertex and iter % 2 == 0:
+            start_vertex = self.traversing_path[i].source            
+            
+            rc_start_v = self.rc_vertex_map[start_vertex]
+            if iter % 2 == 0 and rc_start_v in self.end_positions:
+                # We can do inversion
+                j_candidates = [j for j in self.end_positions[rc_start_v] if j > i]
+                if not j_candidates:
+                    continue
+                j = random.choice(j_candidates)
                 # not allowing to invert AUX node
-                if self.node_mapper and self.node_mapper.has_name("AUX"):
-                    forbidden = False
+                forbidden = False
+                if self.node_mapper and self.node_mapper.has_name("AUX"):                
                     aux_id = self.node_mapper.get_id_for_name("AUX")
                     for ind in range(i, j + 1):
                         if self.traversing_path[ind].original_node == aux_id:
                             forbidden = True
                             break
-                    if forbidden:
-                        logging.debug(f"Skipping inversion due to AUX node presence between {i} and {j}")
-                        continue
+                if forbidden:
+                    logging.debug(f"Skipping inversion due to AUX node presence between {i} and {j}")
+                    continue
+                
                 # Invert the interval from i to j
                 new_path = self.traversing_path[:i] + rc_path(self.traversing_path[i:j + 1], self.rc_vertex_map) + self.traversing_path[j + 1:]
-
                 logging.debug(f"{_ + 1} attempts to generate random inversion")                
                 logging.debug(f"{get_gaf_string(new_path, self.node_mapper)}")
                 return new_path
+            else: 
+                #Doing regular interval swap
+                j = random.randint(i + 1,  path_length - 2) 
+                end_vertex = self.traversing_path[j].target
 
-            # Find k where path[k].source == start_node and k > j
-            k_candidates = [k for k in self.start_positions.get(start_vertex, []) if k > j]
-            if not k_candidates:
-                continue
-            # Choose k randomly without temperature weighting
-            k = random.choice(k_candidates)
+                # Find k where path[k].source == start_node and k > j
+                k_candidates = [k for k in self.start_positions.get(start_vertex, []) if k > j]
+                if not k_candidates:
+                    continue
+                # Choose k randomly without temperature weighting
+                k = random.choice(k_candidates)
 
-            # Find l such that path[l].target == end_node and l > k
-            l_candidates = [l for l in self.end_positions.get(end_vertex, []) if l > k]
-            if not l_candidates:
-                continue
-            
-            # Choose l randomly without temperature weighting
-            l = random.choice(l_candidates)
-            # Swap the intervals
-            new_path = (
-                self.traversing_path[:i]
-                + self.traversing_path[k:l + 1]
-                + self.traversing_path[j + 1:k]
-                + self.traversing_path[i:j + 1]
-                + self.traversing_path[l + 1:]
-            )
-            logging.debug(f"{_ + 1} attempts to generate random swap")
-            logging.debug(f"{get_gaf_string(new_path, self.node_mapper)}")
-            return new_path
+                # Find l such that path[l].target == end_node and l > k
+                l_candidates = [l for l in self.end_positions.get(end_vertex, []) if l > k]
+                if not l_candidates:
+                    continue
+                
+                # Choose l randomly without temperature weighting
+                l = random.choice(l_candidates)
+                # Swap the intervals
+                new_path = (
+                    self.traversing_path[:i]
+                    + self.traversing_path[k:l + 1]
+                    + self.traversing_path[j + 1:k]
+                    + self.traversing_path[i:j + 1]
+                    + self.traversing_path[l + 1:]
+                )
+                logging.debug(f"{_ + 1} attempts to generate random swap")
+                logging.debug(f"{get_gaf_string(new_path, self.node_mapper)}")
+                return new_path
         logging.warning("Failed to find valid intervals to swap")
         logging.warning(f"{get_gaf_string(self.traversing_path, self.node_mapper)}")
         #exit(9)
