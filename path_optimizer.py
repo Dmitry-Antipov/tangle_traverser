@@ -16,7 +16,11 @@ class PathOptimizer:
         self.seed = seed
         self.node_mapper = node_mapper
         self.traversing_path = self.generate_random_eulerian_path()
-        #Storing for debug only
+
+        #indices from vertices to path positions
+        self.start_positions = {}
+        self.end_positions = {}
+        
         
 
     def generate_random_eulerian_path(self):
@@ -88,6 +92,20 @@ class PathOptimizer:
     def set_path(self, new_path):
         self.traversing_path = new_path
 
+    def update_start_end_positions(self):
+        self.start_positions = {}
+        self.end_positions = {}
+
+        for idx, edge_descr in enumerate(self.traversing_path):
+            if edge_descr.source not in self.start_positions:
+                self.start_positions[edge_descr.source] = []
+            self.start_positions[edge_descr.source].append(idx)
+
+            if edge_descr.target not in self.end_positions:
+                self.end_positions[edge_descr.target] = []
+            self.end_positions[edge_descr.target].append(idx)
+        return
+
     def get_random_change(self, iter, rc_vertex_map):
         """
         Finds two non-overlapping intervals in the Eulerian path that start and end at the same vertices
@@ -101,18 +119,10 @@ class PathOptimizer:
         random.seed(iter)
         path_length = len(self.traversing_path)
         
+        self.update_start_end_positions()
+
         # Pre-build index of matching start/end positions for faster lookup
-        start_positions = {}
-        end_positions = {}
 
-        for idx, edge_descr in enumerate(self.traversing_path):
-            if edge_descr.source not in start_positions:
-                start_positions[edge_descr.source] = []
-            start_positions[edge_descr.source].append(idx)
-
-            if edge_descr.target not in end_positions:
-                end_positions[edge_descr.target] = []
-            end_positions[edge_descr.target].append(idx)
 
         max_tries = 10000  # Adjust based on path length
         
@@ -121,10 +131,10 @@ class PathOptimizer:
             i = random.randint(0, path_length - 3)
             j = random.randint(i + 1,  path_length - 2) 
 
-            start_node = self.traversing_path[i].source
-            end_node = self.traversing_path[j].target
+            start_vertex = self.traversing_path[i].source
+            end_vertex = self.traversing_path[j].target
             #We can do inversion
-            if rc_vertex_map[start_node] == end_node and iter % 2 == 0:
+            if rc_vertex_map[start_vertex] == end_vertex and iter % 2 == 0:
                 # not allowing to invert AUX node            
                 if self.node_mapper and self.node_mapper.has_name("AUX"):
                     forbidden = False
@@ -144,14 +154,14 @@ class PathOptimizer:
                 return new_path
 
             # Find k where path[k].source == start_node and k > j
-            k_candidates = [k for k in start_positions.get(start_node, []) if k > j]
+            k_candidates = [k for k in self.start_positions.get(start_vertex, []) if k > j]
             if not k_candidates:
                 continue
             # Choose k randomly without temperature weighting
             k = random.choice(k_candidates)
 
             # Find l such that path[l].target == end_node and l > k
-            l_candidates = [l for l in end_positions.get(end_node, []) if l > k]
+            l_candidates = [l for l in self.end_positions.get(end_vertex, []) if l > k]
             if not l_candidates:
                 continue
             
@@ -174,39 +184,20 @@ class PathOptimizer:
         return self.traversing_path
 
     def get_synonymous_changes(self, path, rc_vertex_map, alignment_scorer):
-        """
-        Find synonymous changes in the path - intervals that can be swapped or inverted 
-        without changing the alignment score.
-        """
-        # Import necessary functions that might be needed
-        
-        #some copy-paste
-        path_length = len(path)    
-        # Pre-build index of matching start/end positions for faster lookup
-        start_positions = {}
-        end_positions = {}
-        final_score = alignment_scorer.score_corasick(path)
-        for idx, edge_descr in enumerate(path):
-            if edge_descr.source not in start_positions:
-                start_positions[edge_descr.source] = []
-            start_positions[edge_descr.source].append(idx)
-
-            if edge_descr.target not in end_positions:
-                end_positions[edge_descr.target] = []
-            end_positions[edge_descr.target].append(idx)
-
+        self.update_start_end_positions()
         swappable_intervals = set()
-        for start_v in start_positions:
-            for end_v in end_positions:
-                for first_start_ind in range(len(start_positions[start_v])-1):
-                    for second_start_ind in range(first_start_ind + 1, len(start_positions[start_v])):
-                        for first_end_ind in range(len(end_positions[end_v]) - 1):
-                            for second_end_ind in range(first_end_ind + 1, len(end_positions[end_v])):
+        final_score = alignment_scorer.score_corasick(path)
+        for start_v in self.start_positions:
+            for end_v in self.end_positions:
+                for first_start_ind in range(len(self.start_positions[start_v])-1):
+                    for second_start_ind in range(first_start_ind + 1, len(self.start_positions[start_v])):
+                        for first_end_ind in range(len(self.end_positions[end_v]) - 1):
+                            for second_end_ind in range(first_end_ind + 1, len(self.end_positions[end_v])):
                                 #valid swap
-                                start_path_first_ind = start_positions[start_v][first_start_ind]
-                                end_path_first_ind = end_positions[end_v][first_end_ind]
-                                start_path_second_ind = start_positions[start_v][second_start_ind]
-                                end_path_second_ind = end_positions[end_v][second_end_ind]
+                                start_path_first_ind = self.start_positions[start_v][first_start_ind]
+                                end_path_first_ind = self.end_positions[end_v][first_end_ind]
+                                start_path_second_ind = self.start_positions[start_v][second_start_ind]
+                                end_path_second_ind = self.end_positions[end_v][second_end_ind]
                                 #for an interval start and end can be same - one node paths. But different intervals should not overlap
                                 if end_path_first_ind < start_path_first_ind or end_path_second_ind < start_path_second_ind or start_path_second_ind <= end_path_first_ind:                                
                                     continue
@@ -243,12 +234,12 @@ class PathOptimizer:
                                     swappable_intervals.add((start_path_first_ind + left_shift, end_path_first_ind - right_shift, start_path_second_ind + left_shift, end_path_second_ind - right_shift))
                                     logging.debug(f"Edge paths are {first_gaf_fragment} and {second_gaf_fragment}")
         invertable_intervals = set()
-        for start_v in start_positions:
+        for start_v in self.start_positions:
             rc_start_v = rc_vertex_map[start_v]
-            if not rc_start_v in end_positions:
+            if not rc_start_v in self.end_positions:
                 continue
-            for start_path_ind in start_positions[start_v]:
-                for end_path_ind in end_positions[rc_start_v]:
+            for start_path_ind in self.start_positions[start_v]:
+                for end_path_ind in self.end_positions[rc_start_v]:
                     #check if we can invert a self-rc interval
                     if start_path_ind < end_path_ind:
                         #invert the interval
