@@ -12,34 +12,22 @@ import cProfile
 import pstats
 import time
 import os
-import ahocorasick
 import dataclasses
-from path_optimizer import PathOptimizer, EdgeDescription
+from path_optimizer import PathOptimizer
+from path_supplementary import EdgeDescription, get_gaf_path, get_gaf_string, rc_path
+from alignment_scorer import AlignmentScorer
+from logging_utils import setup_logging, log_assert
+from node_mapper import NodeIdMapper
 
-# Add a global map for node ID to string node names
-#only positive ids (unoriented)
-node_id_to_name = {}
-name_to_node_id = {}
-last_enumerated_node = 0
+# Create a global node mapper instance
+node_mapper = NodeIdMapper()
+
 #allowed median coverage range in range [median_unique/MEDIAN_COVERAGE_VARIATION, median_unique * MEDIAN_COVERAGE_VARIATION]
 DETECTED_MEDIAN_COVERAGE_VARIATION = 1.5
 GIVEN_MEDIAN_COVERAGE_VARIATION = 1.2
 
 #Add this length (max) from the nodes neighboring tangle to fasta for better alignment
 UNIQUE_BORDER_LENGTH = 200000
-
-def node_id_to_name_safe(node_id):
-    """Safely convert node ID to name, handling cases where name might not exist"""
-    if node_id > 0:
-        prefix = ">"
-    else:
-        prefix = "<"
-    node_id = abs(node_id)
-    if node_id in node_id_to_name:
-        return prefix + node_id_to_name[node_id]
-    else:
-        logging.error(f"Node ID {node_id} not found in name mapping.")
-        exit(1)
 
 #Multiplicities detection magic is here
 #TODO: length-based weights?
@@ -58,8 +46,8 @@ def solve_MIP(equations, nonzeros, boundary_values, coverages, unique_coverage_r
             for j in eq[ind]:
                 abs_keys.add(abs(j))
     for key in abs_keys:
-        log_assert(key in keys and -key in keys, f"One of the keys {node_id_to_name_safe(key)} or {node_id_to_name_safe(-key)} is not in equations {equations}")
-        log_assert(key in coverages , f"Key {node_id_to_name_safe(key)} is not in coverages")
+        log_assert(key in keys and -key in keys, f"One of the keys {node_mapper.node_id_to_name_safe(key)} or {node_mapper.node_id_to_name_safe(-key)} is not in equations {equations}")
+        log_assert(key in coverages , f"Key {node_mapper.node_id_to_name_safe(key)} is not in coverages")
 
     #TODO: we can check for hairpin presence just here.
     x_vars = {i: pulp.LpVariable(f"x_{i}", cat="Integer") for i in keys}
@@ -106,7 +94,7 @@ def solve_MIP(equations, nonzeros, boundary_values, coverages, unique_coverage_r
     result = {i: int(pulp.value(x_vars[i])) for i in keys}
     
     # Convert result to use node names for logging
-    result_with_names = {node_id_to_name_safe(i): result[i] for i in result}
+    result_with_names = {node_mapper.node_id_to_name_safe(i): result[i] for i in result}
     logging.info(f"Found multiplicities from MIP {result_with_names}")
     score = pulp.value(objective)  
     detected_coverage = 1/pulp.value(inv_unique_coverage)
@@ -132,9 +120,9 @@ def parse_gfa(file_path):
                 continue
             if line.startswith('S'):
                 parts = line.strip().split('\t')
-                node_id = parse_node_id(parts[1])
-                node_id_to_name[node_id] = parts[1]  # Map node ID to its string name
-                #node_id_to_name[-node_id] = '-' + parts[1]  # Map reverse complement
+                node_id = node_mapper.parse_node_id(parts[1])
+                node_mapper.add_mapping(node_id, parts[1])  # Map node ID to its string name
+                #node_mapper.node_id_to_name[-node_id] = '-' + parts[1]  # Map reverse complement
 
                 # Extract node length from LN:i:<length> or length of provided string
                 length = len(parts[2])
@@ -155,11 +143,11 @@ def parse_gfa(file_path):
                 if len(parts) < 5:
                     continue  # Skip malformed lines
 
-                from_node = parse_node_id(parts[1])
+                from_node = node_mapper.parse_node_id(parts[1])
                 if parts[2] == '-':
                     from_node = -from_node
 
-                to_node = parse_node_id(parts[3])
+                to_node = node_mapper.parse_node_id(parts[3])
                 if parts[4] == '-':
                     to_node = -to_node
 
@@ -202,12 +190,12 @@ def parse_gfa(file_path):
                                 overlap_sizes.append(original_graph[n1][n2].get('overlap', 0))
                                 min_overlap = min(overlap_sizes) if overlap_sizes else 0
                                 original_graph.add_edge(start_node, n2, overlap=min_overlap)
-                                logging.debug(f"Non-transitive junction! Adding {node_id_to_name_safe(start_node)} -> {node_id_to_name_safe(n2)}, overlap {min_overlap}")
+                                logging.debug(f"Non-transitive junction! Adding {node_mapper.node_id_to_name_safe(start_node)} -> {node_mapper.node_id_to_name_safe(n2)}, overlap {min_overlap}")
                                 non_transitive_junctions += 1
                                 overlap_counted = True
                                 break
                         if not overlap_counted:
-                            logging.warning(f"Non-transitive junction failed to get overlap. Adding {node_id_to_name_safe(start_node)} -> {node_id_to_name_safe(n2)}, overlap 0")
+                            logging.warning(f"Non-transitive junction failed to get overlap. Adding {node_mapper.node_id_to_name_safe(start_node)} -> {node_mapper.node_id_to_name_safe(n2)}, overlap 0")
                             original_graph.add_edge(start_node, n2, overlap=0)
     logging.info(f"Tuned non-transitive junctions: {non_transitive_junctions}")
     return original_graph
@@ -241,17 +229,17 @@ def calculate_median_unique_coverage(nor_nodes, original_graph, cov, min_b):
             if node_id in cov and cov[node_id] < min_b * GIVEN_MEDIAN_COVERAGE_VARIATION:
                 coverage = float(cov[node_id])
                 if coverage == 0:
-                    logging.info(f"Node {node_id_to_name_safe(node_id)} has zero coverage ,excluding from unique coverage calculation.")
+                    logging.info(f"Node {node_mapper.node_id_to_name_safe(node_id)} has zero coverage ,excluding from unique coverage calculation.")
                     continue
                 unique_coverages.append([coverage, original_graph.nodes[node_id].get('length', 0), node_id])
                 unique_node_ids.add(node_id)
-                logging.debug(f"Node {node_id_to_name_safe(node_id)} is unique. Coverage: {coverage}")
+                logging.debug(f"Node {node_mapper.node_id_to_name_safe(node_id)} is unique. Coverage: {coverage}")
             elif cov[node_id] >= min_b * GIVEN_MEDIAN_COVERAGE_VARIATION:
-                logging.debug(f"Node {node_id_to_name_safe(node_id)} looks structurally unique but coverage {cov[node_id]} is higher than borders {min_b} * variation {GIVEN_MEDIAN_COVERAGE_VARIATION}")
+                logging.debug(f"Node {node_mapper.node_id_to_name_safe(node_id)} looks structurally unique but coverage {cov[node_id]} is higher than borders {min_b} * variation {GIVEN_MEDIAN_COVERAGE_VARIATION}")
             else:
-                logging.warning(f"Structurally unique node {node_id_to_name_safe(node_id)} not found in coverage file.")
+                logging.warning(f"Structurally unique node {node_mapper.node_id_to_name_safe(node_id)} not found in coverage file.")
         #else:
-            #logging.debug(f"Node {node_id_to_name_safe(node_id)} is not structurally unique (+ unique: {is_plus_unique}, - unique: {is_minus_unique}).")
+            #logging.debug(f"Node {node_mapper.node_id_to_name_safe(node_id)} is not structurally unique (+ unique: {is_plus_unique}, - unique: {is_minus_unique}).")
 
 
     if not unique_coverages:
@@ -270,7 +258,7 @@ def calculate_median_unique_coverage(nor_nodes, original_graph, cov, min_b):
     unique_debug = []
     #TODO: global mapping to restore original names
     for u in unique_node_ids:
-        unique_debug.append(node_id_to_name[u])
+        unique_debug.append(node_mapper.node_id_to_name[u])
     logging.info(f"Found {len(unique_node_ids)} structurally unique nodes: {sorted(unique_debug)}")
     logging.info(f"Calculated median coverage of unique nodes: {median_cov:.2f}")
     logging.debug(f"Unique coverages: {unique_coverages}")
@@ -289,9 +277,9 @@ def get_canonical_nodepair(oriented_node1, oriented_node2, original_graph):
         if rc_node(node) < from_node:
             from_node = rc_node(node)
     if not (to_node in original_graph.successors(from_node)):
-        logging.warning(f"Irregular junction {node_id_to_name_safe(from_node)} {node_id_to_name_safe(to_node)} {node_id_to_name_safe(oriented_node1)} {node_id_to_name_safe(oriented_node2)}")
-        logging.warning(f"{node_id_to_name_safe(from_node)} -> {[node_id_to_name_safe(n) for n in original_graph.successors(from_node)]}")
-        logging.warning(f"{node_id_to_name_safe(rc_node(to_node))} -> {[node_id_to_name_safe(n) for n in original_graph.successors(rc_node(to_node))]}")        
+        logging.warning(f"Irregular junction {node_mapper.node_id_to_name_safe(from_node)} {node_mapper.node_id_to_name_safe(to_node)} {node_mapper.node_id_to_name_safe(oriented_node1)} {node_mapper.node_id_to_name_safe(oriented_node2)}")
+        logging.warning(f"{node_mapper.node_id_to_name_safe(from_node)} -> {[node_mapper.node_id_to_name_safe(n) for n in original_graph.successors(from_node)]}")
+        logging.warning(f"{node_mapper.node_id_to_name_safe(rc_node(to_node))} -> {[node_mapper.node_id_to_name_safe(n) for n in original_graph.successors(rc_node(to_node))]}")        
     return (from_node, to_node)
 
 def get_canonical_rc_vertex(v, original_graph):
@@ -337,7 +325,7 @@ def create_dual_graph(original_graph:nx.MultiDiGraph):
         dual_graph.add_node(C1)
         dual_graph.add_node(C2)
         dual_graph.add_edge(C1, C2, original_node=v)
-        logging.debug(f"Added edge from {C1} to {C2} in dual graph, original node: {node_id_to_name_safe(v)}")
+        logging.debug(f"Added edge from {C1} to {C2} in dual graph, original node: {node_mapper.node_id_to_name_safe(v)}")
 
     logging.info(f"Total oriented nodes in original GFA structure: {len(original_graph.nodes)}")
     logging.info(f"Total unique canonical edges (dual nodes): {len(canonical_edges_set)}")
@@ -372,7 +360,7 @@ def create_multi_dual_graph(dual_graph: nx.DiGraph, multiplicities: dict, tangle
     for b in boundary_nodes.keys():
         for next_node in G.successors(b):
             fw_edge = get_canonical_nodepair(b, next_node, G)                                
-            logging.debug(f"start {node_id_to_name_safe(b)} {node_id_to_name_safe(next_node)}")
+            logging.debug(f"start {node_mapper.node_id_to_name_safe(b)} {node_mapper.node_id_to_name_safe(next_node)}")
             start = (0, b)
             multi_dual_graph.add_node(start)
             multi_dual_graph.add_edge(start, fw_edge, original_node=b, key = f"{b}_{edges_added}")
@@ -381,7 +369,7 @@ def create_multi_dual_graph(dual_graph: nx.DiGraph, multiplicities: dict, tangle
     for b in boundary_nodes.values():
         for next_node in G.predecessors(b):
             bw_edge = get_canonical_nodepair(next_node, b, G)                                
-            logging.debug(f"start {node_id_to_name_safe(next_node)} {node_id_to_name_safe(b)}")
+            logging.debug(f"start {node_mapper.node_id_to_name_safe(next_node)} {node_mapper.node_id_to_name_safe(b)}")
             start = (b, 0)
             multi_dual_graph.add_node(start)
             multi_dual_graph.add_edge(bw_edge, start, original_node=b, key = f"{b}_{edges_added}")
@@ -403,10 +391,10 @@ def create_multi_dual_graph(dual_graph: nx.DiGraph, multiplicities: dict, tangle
         multiplicity = multiplicities[original_node_base]
 
         if multiplicity < 0:
-            logging.error(f"Negative multiplicity {multiplicity} for node {node_id_to_name_safe(original_node_base)}. Treating as 0 for edge ({u} -> {v}).")
+            logging.error(f"Negative multiplicity {multiplicity} for node {node_mapper.node_id_to_name_safe(original_node_base)}. Treating as 0 for edge ({u} -> {v}).")
             exit(0)
         # Add the edge 'multiplicity' times to the multi-dual graph
-        logging.debug(f"Adding {multiplicity} multiedges for {node_id_to_name_safe(original_node_oriented)}")
+        logging.debug(f"Adding {multiplicity} multiedges for {node_mapper.node_id_to_name_safe(original_node_oriented)}")
         for _ in range(multiplicity):
             # Add edge with the original node attribute
             multi_dual_graph.add_edge(u, v, original_node=original_node_oriented, key = str(original_node_oriented) + "_"+str(edges_added))
@@ -457,11 +445,11 @@ def get_traversable_subgraph(multi_dual_graph: nx.MultiDiGraph, border_nodes, or
     # If there are 4 border nodes, we need to find the correct end vertex and add the auxiliary connection
     if border_nodes_count == 2:
         aux_node_str = "AUX"
-        aux_int_id = parse_node_id(aux_node_str)  
+        aux_int_id = node_mapper.parse_node_id(aux_node_str)  
         multi_dual_graph.add_edge(matching_end_vertex, start_vertices[1], original_node=aux_int_id, key = f"{aux_int_id}_0")
 
 
-        logging.info(f"Added auxiliary edge from {node_id_to_name_safe(matching_end_vertex_node)} to {node_id_to_name_safe(start_vertices[1][1])}")
+        logging.info(f"Added auxiliary edge from {node_mapper.node_id_to_name_safe(matching_end_vertex_node)} to {node_mapper.node_id_to_name_safe(start_vertices[1][1])}")
         reachable_verts = nx.descendants(multi_dual_graph, start_vertex)
         # Add the start_node itself
         reachable_verts.add(start_vertex)
@@ -502,91 +490,6 @@ def get_traversable_subgraph(multi_dual_graph: nx.MultiDiGraph, border_nodes, or
     log_assert(len(unreachable_edges) == 0, f"Unreachable edges are still present: {unreachable_edges}")
     reachable_subgraph = multi_dual_graph.subgraph(reachable_verts)
     return reachable_subgraph, start_vertex
-    
-def get_gaf_path(path):
-    res = []
-    for i in range(len(path)):
-        edge = path[i].original_node
-        node = node_id_to_name_safe(edge)      
-        res.append(node)
-    return res
-
-def get_gaf_string(path):
-    path_arr = get_gaf_path(path)
-    res = "".join(path_arr)
-    #logging.info(res)
-    return res
-
-
-class AlignmentScorer:
-    #TODO: deprioritize based on lengths and not just node counts
-    #With othervise equivaltent solution we belive more in one with smaller inversion
-    DEPRIORITIZE_RC_COEFFICIENT = 0.9
-
-    #TODO:
-    #add coefficient to balance path lengths for two-haplotype tangles
-    def __init__(self, alignments):
-        self.automaton = ahocorasick.Automaton()
-        self.pattern_counts = {}
-        
-        #from lexicographical minimum of (pattern, rc_pattern) to max
-        self.rc_patterns = {}
-        for idx, alignment in enumerate(alignments):
-            logging.debug(f"Adding alignment {idx}: {alignment}")
-            pattern_str = self.aln_to_string(alignment)
-            rc_nodes = [-n for n in alignment]
-            rc_nodes.reverse()
-            rc_pattern_str = self.aln_to_string(rc_nodes)
-            
-            #lexicographical minimum
-            #if ",".join(nodes) > ",".join(rc_nodes):
-             #   nodes = rc_nodes
-
-            if pattern_str not in self.pattern_counts:
-                self.pattern_counts[pattern_str] = 0
-                self.pattern_counts[rc_pattern_str] = 0
-                self.automaton.add_word(pattern_str, pattern_str)
-                self.automaton.add_word(rc_pattern_str, rc_pattern_str)     
-                self.rc_patterns[pattern_str] = rc_pattern_str
-                self.rc_patterns[rc_pattern_str] = pattern_str   
-            self.pattern_counts[pattern_str] += 1
-            self.pattern_counts[rc_pattern_str] += 1
-
-        self.automaton.make_automaton()
-        logging.debug(f"automaton keys {list(self.automaton.keys())}")
-        logging.info(f"Built automaton with {len(self.pattern_counts)} unique alignment patterns")
-
-    def path_to_string(self, path):
-        return "," + ",".join(str(edge.original_node) for edge in path) + ","
-    
-    def aln_to_string(self, aln):
-        return "," + ",".join(str(node) for node in aln) + ","
-    
-    def score_corasick(self, path):
-        path_str = self.path_to_string(path)
-        found = set()
-        for item in self.automaton.iter(path_str):
-            pattern = item[1]
-            found.add(pattern)
-        score = 0
-        for item in found:
-            #only looking for one of (pattern, rc_pattern)
-            if self.rc_patterns[item] in found:
-                score += self.pattern_counts[item] * self.DEPRIORITIZE_RC_COEFFICIENT
-                #TODO: possibly add paths length 1 for better deprioritization?
-                logging.debug(f"deprioritizing {item} because of rc")
-            else:
-                score += self.pattern_counts[item] * 2
-        return score
-
-def rc_path(path, rc_vertex_map):
-    new_path = []
-    for edge in path:
-        new_u = rc_vertex_map[edge.source]
-        new_v = rc_vertex_map[edge.target]
-        new_path.append(EdgeDescription(new_v, new_u, -edge.original_node))
-    new_path.reverse()
-    return new_path
 
 def parse_gaf(gaf_file, interesting_nodes, filtered_file, quality_threshold):
     res = []
@@ -618,7 +521,7 @@ def parse_gaf(gaf_file, interesting_nodes, filtered_file, quality_threshold):
             nodes = []
             good = True
             for fnode in filtered_nodes:            
-                int_node = parse_node_id(fnode[1:])
+                int_node = node_mapper.parse_node_id(fnode[1:])
                 if not (int_node in interesting_nodes):
                     good = False
                     break
@@ -631,134 +534,6 @@ def parse_gaf(gaf_file, interesting_nodes, filtered_file, quality_threshold):
                 if filtered_file:
                     out_file.write(line)
     return  res 
-
-def get_synonymous_changes(path, rc_vertex_map, alignment_scorer: AlignmentScorer):
-    #some copy-paste
-    path_length = len(path)    
-    # Pre-build index of matching start/end positions for faster lookup
-    start_positions = {}
-    end_positions = {}
-    final_score = alignment_scorer.score_corasick(path)
-    for idx, edge_descr in enumerate(path):
-        if edge_descr.source not in start_positions:
-            start_positions[edge_descr.source] = []
-        start_positions[edge_descr.source].append(idx)
-
-        if edge_descr.target not in end_positions:
-            end_positions[edge_descr.target] = []
-        end_positions[edge_descr.target].append(idx)
-
-    swappable_intervals = set()
-    for start_v in start_positions:
-        for end_v in end_positions:
-            for first_start_ind in range(len(start_positions[start_v])-1):
-                for second_start_ind in range(first_start_ind + 1, len(start_positions[start_v])):
-                    for first_end_ind in range(len(end_positions[end_v]) - 1):
-                        for second_end_ind in range(first_end_ind + 1, len(end_positions[end_v])):
-                            #valid swap
-                            start_path_first_ind = start_positions[start_v][first_start_ind]
-                            end_path_first_ind = end_positions[end_v][first_end_ind]
-                            start_path_second_ind = start_positions[start_v][second_start_ind]
-                            end_path_second_ind = end_positions[end_v][second_end_ind]
-                            #for an interval start and end can be same - one node paths. But different intervals should not overlap
-                            if end_path_first_ind < start_path_first_ind or end_path_second_ind < start_path_second_ind or start_path_second_ind <= end_path_first_ind:                                
-                                continue
-                            first_gaf_fragment = get_gaf_path(path[start_path_first_ind:end_path_first_ind+1])
-                            second_gaf_fragment = get_gaf_path(path[start_path_second_ind:end_path_second_ind+1])
-                            logging.debug(first_gaf_fragment)
-                            logging.debug(second_gaf_fragment)
-                            if first_gaf_fragment == second_gaf_fragment:
-                                logging.debug(f"Found synonymous change: {first_gaf_fragment} positions {start_path_first_ind}-{end_path_first_ind} and {start_path_second_ind}-{end_path_second_ind}, not checking")
-                                continue
-                            new_path = (
-                            path[:start_path_first_ind]
-                                + path[start_path_second_ind:end_path_second_ind + 1]
-                                + path[end_path_first_ind + 1:start_path_second_ind]
-                                + path[start_path_first_ind:end_path_first_ind + 1]
-                                + path[end_path_second_ind + 1:]
-                            )
-                            log_assert((len(new_path) == len(path)), f"New path length does not match original path len = {len(path)} indices {start_path_first_ind}-{end_path_first_ind} and {start_path_second_ind}-{end_path_second_ind}")
-                            new_score = alignment_scorer.score_corasick(new_path)
-                            log_assert(new_score <= final_score, "New path score is greater than original path score")
-                            logging.debug(f"New path score: {new_score}, original path score: {final_score} positions {start_path_first_ind}-{end_path_first_ind} and {start_path_second_ind}-{end_path_second_ind}")
-                            if new_score < final_score:
-                                logging.debug(f"Swap {start_path_first_ind}-{end_path_first_ind} with {start_path_second_ind}-{end_path_second_ind} decreases score, continuing")
-                            elif new_score == final_score:
-
-                                left_shift = 0
-                                right_shift = 0
-                                while first_gaf_fragment[left_shift] == second_gaf_fragment[left_shift]:
-                                    left_shift += 1
-                                while first_gaf_fragment[-right_shift-1] == second_gaf_fragment[-right_shift-1]:
-                                    right_shift += 1
-                                logging.debug(f"Swap {start_path_first_ind}-{end_path_first_ind} with {start_path_second_ind}-{end_path_second_ind} does not change score")
-                                logging.debug(f"Tuned intervals {start_path_first_ind + left_shift}-{end_path_first_ind - right_shift} with {start_path_second_ind + left_shift}-{end_path_second_ind - right_shift}")
-                                swappable_intervals.add((start_path_first_ind + left_shift, end_path_first_ind - right_shift, start_path_second_ind + left_shift, end_path_second_ind - right_shift))
-                                logging.debug(f"Edge paths are {first_gaf_fragment} and {second_gaf_fragment}")
-    invertable_intervals = set()
-    for start_v in start_positions:
-        rc_start_v = rc_vertex_map[start_v]
-        if not rc_start_v in end_positions:
-            continue
-        for start_path_ind in start_positions[start_v]:
-            for end_path_ind in end_positions[rc_start_v]:
-                #check if we can invert a self-rc interval
-                if start_path_ind < end_path_ind:
-                    #invert the interval
-                    inverted_path = rc_path(path[start_path_ind:end_path_ind + 1], rc_vertex_map)
-                    if get_gaf_string(inverted_path) == get_gaf_string(path[start_path_ind:end_path_ind + 1]):
-                        logging.debug(f"Found equivalent inverted path: {get_gaf_string(inverted_path)}")
-                        continue
-                    new_path = path[:start_path_ind] + rc_path(path[start_path_ind:end_path_ind + 1], rc_vertex_map) + path[end_path_ind + 1:]
-                    new_score = alignment_scorer.score_corasick(new_path)
-                    log_assert(new_score <= final_score, "New path score is greater than original path score")
-                    logging.debug(f"New path score: {new_score}, original path score: {final_score} positions {start_path_ind}-{end_path_ind}")
-                    if new_score < final_score:
-                        logging.debug(f"Inversion {start_path_ind}-{end_path_ind} decreases score, continuing")
-                    elif new_score == final_score:
-                        invertable_intervals.add((start_path_ind, end_path_ind))
-                        logging.debug(f"Inversion {start_path_ind}-{end_path_ind} does not change score")
-                        logging.debug(f"Edge paths are {get_gaf_string(path[start_path_ind:end_path_ind + 1])}")
-    #TODO: check for possible inversions
-    if len(invertable_intervals) + len(swappable_intervals) > 0:
-        if len(swappable_intervals) > 0:
-            logging.warning(f"Total {len(swappable_intervals)} path swaps with the same score found!")
-            for first_start, first_end, second_start, second_end in swappable_intervals:
-                logging.info(f"Swappable interval: {first_start}-{first_end} with {second_start}-{second_end}")
-                logging.info(f"Subpaths {get_gaf_string(path[first_start:first_end + 1])} and {get_gaf_string(path[second_start:second_end + 1])}")
-        if len(invertable_intervals) > 0:
-            logging.warning(f"Total {len(invertable_intervals)} path inversions with the same score found!")
-            for start, end in invertable_intervals:
-                logging.info(f"Invertable interval: {start}-{end}")
-                logging.info(f"Subpath {get_gaf_string(path[start:end + 1])}")
-    else:
-        logging.info("No equivalent paths found")
-
-#utig4-234 -> 234
-def parse_node_id(node_str): 
-    if node_str in name_to_node_id:
-        return name_to_node_id[node_str]
-    global last_enumerated_node
-    parts = node_str.split('-')
-    if len(parts) < 2 or not parts[1].isdigit():
-        #ribotin graph case
-        if node_str.isdigit():            
-            node_id = int(node_str)
-        else:
-            last_enumerated_node += 1
-            node_id = last_enumerated_node
-            logging.debug(f"Assigned enumerated ID {node_id} to node {node_str}")
-    else:
-        node_id = int(parts[1])
-
-    #utig4-0 same as its RC
-    if node_id < last_enumerated_node:
-        last_enumerated_node += 1
-        node_id = last_enumerated_node
-        logging.info(f"Assigned enumerated ID {node_id} to node {node_str}, utig4-0 special case")
-    node_id_to_name[node_id] = node_str
-    name_to_node_id[node_str] = node_id
-    return node_id
 
 def node_to_tangle(directed_graph, length_cutoff, target_node):
     """
@@ -780,7 +555,7 @@ def node_to_tangle(directed_graph, length_cutoff, target_node):
     connected_component = nx.node_connected_component(indirect_graph, target_node)
     logging.info(f"Total {len(connected_component)} tangle nodes in connected component")
     for u in connected_component:
-        logging.debug(f"Tangle node {node_id_to_name_safe(abs(u))}")
+        logging.debug(f"Tangle node {node_mapper.node_id_to_name_safe(abs(u))}")
     rc_component = nx.node_connected_component(indirect_graph, -target_node)
     connected_component.update(rc_component)
     
@@ -797,86 +572,11 @@ def clean_tips (tangle_nodes, directed_graph):
                 changed = True
                 to_erase.append(n)
         for n in to_erase:
-            logging.info(f"Cleaning {node_id_to_name_safe(n)} from tangle")
+            logging.info(f"Cleaning {node_mapper.node_id_to_name_safe(n)} from tangle")
             tangle_nodes.remove(n)
             directed_graph.remove_node(n)
             
 
-
-def setup_logging(args):
-    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
-    # Configure logging with runtime from program start
-    start_time = time.time()
-    
-    class RuntimeFormatter(logging.Formatter):
-        def __init__(self, fmt=None, datefmt=None, start_time=None):
-            super().__init__(fmt, datefmt)
-            self.start_time = start_time
-            
-        def format(self, record):
-            record.runtime = time.time() - self.start_time
-            return super().format(record)
-        
-    datefmt = '%H:%M:%S'
-
-    def format_runtime(seconds):
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        seconds = int(seconds % 60)
-        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-    
-    class RuntimeFormatter(logging.Formatter):
-        def __init__(self, fmt=None, datefmt=None, start_time=None):
-            super().__init__(fmt, datefmt)
-            self.start_time = start_time
-            
-        def format(self, record):
-            runtime_seconds = time.time() - self.start_time
-            record.runtime = format_runtime(runtime_seconds)
-            return super().format(record)
-    
-    log_format = '%(runtime)s - %(levelname)s - [%(funcName)s:%(lineno)d] - %(message)s'
-    formatter = RuntimeFormatter(log_format, datefmt)
-        
-    # Always log to both file and console
-    log_file = os.path.join(args.outdir, f"{args.basename}.log")
-
-    # Configure root logger
-    root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
-    # File handler
-    file_handler = logging.FileHandler(log_file, mode='w')
-    file_handler.setFormatter(RuntimeFormatter(log_format, datefmt=datefmt, start_time=start_time))
-    file_handler.setLevel(log_level)
-    root_logger.addHandler(file_handler)
-    
-    # Console handler
-    console_handler = logging.StreamHandler(sys.stderr)
-    console_handler.setFormatter(RuntimeFormatter(log_format, datefmt=datefmt, start_time=start_time))
-    console_handler.setLevel(log_level)
-    root_logger.addHandler(console_handler)
-    
-    # Log the GitHub commit hash if available
-    try:
-        commit_hash = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=sys.path[0]).strip().decode('utf-8')
-        logging.info(f"GitHub Commit Hash: {commit_hash}")
-    except Exception as e:
-        logging.warning(f"Failed to retrieve GitHub commit hash: {e}")
-
-    # Log the command-line arguments
-    logging.info(f"Command-line arguments: {' '.join(sys.argv)}")
-    logging.info(f"Logging to file: {log_file}")
-
-def log_assert(condition, message, logger=None):
-    """Assert a condition and log an error message if it fails."""
-    if not condition:
-        error_msg = f"Assertion failed: {message}"
-        if logger:
-            logger.error(error_msg)
-        else:
-            logging.error(error_msg)
-        exit(1)
-        #raise AssertionError(error_msg)
 
 def read_tangle_nodes(args, original_graph):
     """Read or construct tangle nodes."""
@@ -887,12 +587,12 @@ def read_tangle_nodes(args, original_graph):
             for line in f:
                 node_str = line.strip()
                 if node_str:
-                    node_id = parse_node_id(node_str)
+                    node_id = node_mapper.parse_node_id(node_str)
                     tangle_nodes.add(node_id)
                     tangle_nodes.add(-node_id)
                   #  nor_nodes.add(node_id)
     elif args.tangle_node:
-        tangle_nodes = node_to_tangle(original_graph, args.tangle_length_cutoff, target_node=parse_node_id(args.tangle_node))
+        tangle_nodes = node_to_tangle(original_graph, args.tangle_length_cutoff, target_node=node_mapper.parse_node_id(args.tangle_node))
     else:
         logging.error("Either --tangle_file or --tangle_node must be provided.")
         sys.exit(1)
@@ -901,7 +601,7 @@ def read_tangle_nodes(args, original_graph):
         for node in tangle_nodes:
             #only forward nodes to file
             if node > 0:
-                f.write(f"{node_id_to_name[node]}\n")
+                f.write(f"{node_mapper.node_id_to_name[node]}\n")
 
     return tangle_nodes
 
@@ -915,7 +615,7 @@ def read_coverage_file(coverage_file):
             arr = line.strip().split()
             #Usual cov csv format starts with node*
             if len(arr) >= 2 and arr[0] != "node":
-                node_id = parse_node_id(arr[0])
+                node_id = node_mapper.parse_node_id(arr[0])
                 cov[node_id] = float(arr[1])
     return cov
 
@@ -935,7 +635,7 @@ def verify_coverage(cov, original_graph):
     graph_nodes = set(original_graph.nodes())
     for node_id in cov.keys():
         if abs(node_id) not in graph_nodes:
-            logging.error(f"Node {node_id_to_name_safe(node_id)} from coverage file is not present in the assembly graph, please check that coverage corresponds to the same graph")
+            logging.error(f"Node {node_mapper.node_id_to_name_safe(node_id)} from coverage file is not present in the assembly graph, please check that coverage corresponds to the same graph")
             exit(1)    
     missing_length = 0
     total_length = 0
@@ -945,7 +645,7 @@ def verify_coverage(cov, original_graph):
             continue
 
         if node_id not in cov:
-            logging.info(f"Node {node_id_to_name_safe(node_id)} from assembly graph is not present in the coverage file")
+            logging.info(f"Node {node_mapper.node_id_to_name_safe(node_id)} from assembly graph is not present in the coverage file")
             missing_length += original_graph.nodes[node_id].get('length', 0)
         else:
             nodes.append([original_graph.nodes[node_id].get('length', 0), cov[node_id]])
@@ -976,7 +676,7 @@ def calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nod
     min_b = 1000000
     all_boundary = list(boundary_nodes.keys()) + list(boundary_nodes.values())
     for b in all_boundary:
-        logging.info (f"{node_id_to_name_safe(b)} {cov[abs(b)]}")
+        logging.info (f"{node_mapper.node_id_to_name_safe(b)} {cov[abs(b)]}")
         min_b = min(min_b, cov[abs(b)])
     if args.median_unique is not None:
         return [args.median_unique/GIVEN_MEDIAN_COVERAGE_VARIATION, args.median_unique * GIVEN_MEDIAN_COVERAGE_VARIATION]
@@ -998,7 +698,7 @@ def write_multiplicities(output_file, solution, cov):
                 if mult_value != "X" and rev_mult_value != "X":
                     mult_value = int(mult_value) + int(rev_mult_value)
                 cov_value = cov.get(node_id, "N/A")
-                out_file.write(f"{node_id_to_name[node_id]}\t{cov_value}\t{mult_value}\n")
+                out_file.write(f"{node_mapper.node_id_to_name[node_id]}\t{cov_value}\t{mult_value}\n")
     logging.info(f"Wrote multiplicity solutions to {output_file}")
 
 # Update the optimize_paths function to use command-line options for default parameters
@@ -1018,7 +718,7 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, num_initial_path
         if not subgraph_to_traverse:
             logging.warning(f"No Eulerian path found for seed {seed}.")
             continue
-        pathOptimizer = PathOptimizer(subgraph_to_traverse, start_vertex, seed, node_id_to_name_safe, get_gaf_string, name_to_node_id)
+        pathOptimizer = PathOptimizer(subgraph_to_traverse, start_vertex, seed, node_mapper)
 
         current_path = pathOptimizer.get_path()
         current_score = alignment_scorer.score_corasick(current_path)
@@ -1048,6 +748,7 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, num_initial_path
             best_score = current_score
     
     logging.info(f"Optimization completed. Best score: {best_score}.")
+    pathOptimizer.get_synonymous_changes(best_path, rc_vertex_map, alignment_scorer)
     return best_path, best_score
 
 #Messy stuff excluded from main
@@ -1088,7 +789,7 @@ def generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original
            
         if  bad_extension != 0:
             if not (from_node in all_boundary_nodes):
-                logging.error(f"Somehow jumped over boundary nodes {node_id_to_name_safe(from_node)} {node_id_to_name_safe(back_node)} { boundary_nodes}")
+                logging.error(f"Somehow jumped over boundary nodes {node_mapper.node_id_to_name_safe(from_node)} {node_mapper.node_id_to_name_safe(back_node)} { boundary_nodes}")
                 exit()
             else:
                 continue
@@ -1101,7 +802,7 @@ def generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original
                     bad_extension = alt_start_node
                     break
         if bad_extension != 0:
-            logging.error(f"Somehow jumped over boundary nodes (backwards) {node_id_to_name_safe(alt_start_node)} {node_id_to_name_safe(bad_extension)} { boundary_nodes}")
+            logging.error(f"Somehow jumped over boundary nodes (backwards) {node_mapper.node_id_to_name_safe(alt_start_node)} {node_mapper.node_id_to_name_safe(bad_extension)} { boundary_nodes}")
             exit()
         junction_equations.append(arr)
 
@@ -1109,7 +810,7 @@ def generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original
     coverage = {}
     for node in nor_nodes:        
         coverage[node] = float(cov[node]) #/ median_unique
-        logging.debug(f"Coverage of {node_id_to_name_safe(node)} : {coverage[node]}")
+        logging.debug(f"Coverage of {node_mapper.node_id_to_name_safe(node)} : {coverage[node]}")
         if coverage[node] / median_unique >= 0.5:
             must_use_nodes.append(node)
     boundary_values = {}
@@ -1131,7 +832,7 @@ def identify_boundary_nodes(args, original_graph, tangle_nodes):
             #map incoming->matching outgoing
             parts = line.strip().split()
             if len(parts) == 2:
-                node1 = parse_node_id(parts[0])
+                node1 = node_mapper.parse_node_id(parts[0])
                 is_incoming = False
                 for next in original_graph.successors(node1):
                     if next in tangle_nodes:
@@ -1139,7 +840,7 @@ def identify_boundary_nodes(args, original_graph, tangle_nodes):
                         break
                 if not is_incoming:
                     node1 = -node1
-                node2 = parse_node_id(parts[1])
+                node2 = node_mapper.parse_node_id(parts[1])
                 is_outgoing = False
                 for prev in original_graph.predecessors(node2):
                     if prev in tangle_nodes:
@@ -1158,11 +859,11 @@ def identify_boundary_nodes(args, original_graph, tangle_nodes):
                     out_boundary_nodes.add(second)
                 elif second in tangle_nodes and first not in tangle_nodes:
                     in_boundary_nodes.add(first)
-        log_assert(len(out_boundary_nodes) == 2 and len(in_boundary_nodes) == 2, f"Autodetection works only for 1-1 tangles, detected out_boundary: {[node_id_to_name_safe(n) for n in out_boundary_nodes]}, in_boundary: {[node_id_to_name_safe(n) for n in in_boundary_nodes]}. Specify boundary node pairs manually")
+        log_assert(len(out_boundary_nodes) == 2 and len(in_boundary_nodes) == 2, f"Autodetection works only for 1-1 tangles, detected out_boundary: {[node_mapper.node_id_to_name_safe(n) for n in out_boundary_nodes]}, in_boundary: {[node_mapper.node_id_to_name_safe(n) for n in in_boundary_nodes]}. Specify boundary node pairs manually")
         res = {}
         start = max(in_boundary_nodes)
         end = max(out_boundary_nodes)
-        log_assert(abs(start) != abs(end), f"Start and end boundary nodes should be different, got {node_id_to_name_safe(start)} and {node_id_to_name_safe(end)}")
+        log_assert(abs(start) != abs(end), f"Start and end boundary nodes should be different, got {node_mapper.node_id_to_name_safe(start)} and {node_mapper.node_id_to_name_safe(end)}")
         res[start] = end
         return res
 
@@ -1170,8 +871,8 @@ def identify_boundary_nodes(args, original_graph, tangle_nodes):
 def output_path(best_path, original_graph, output_fasta, output_gaf):
 
     aux = -1
-    if "AUX" in name_to_node_id:
-        aux_id = name_to_node_id["AUX"]
+    if node_mapper.has_name("AUX"):
+        aux_id = node_mapper.get_id_for_name("AUX")
         for i in range(len(best_path)):
             if abs(best_path[i].original_node) == aux_id:
                 aux = i
@@ -1185,7 +886,7 @@ def output_path(best_path, original_graph, output_fasta, output_gaf):
     gaf_file = open(output_gaf, 'w')
     count = 0
     for path in paths:
-        gaf_file.write(f"traversal_{count}\t{get_gaf_string(path)}\n")
+        gaf_file.write(f"traversal_{count}\t{get_gaf_string(path, node_mapper)}\n")
         count += 1
     
     with open(output_fasta, 'w') as fasta_file:
@@ -1202,7 +903,7 @@ def output_path(best_path, original_graph, output_fasta, output_gaf):
                 # Retrieve the sequence from the graph
                 node_sequence = original_graph.nodes[node_id]['sequence']
                 if node_sequence == "*":
-                    logging.error("Provided noseq assembly graph, no fasta output possible")
+                    logging.warning("Provided noseq assembly graph, no HPC fasta output possible")
                     return
                 if not orientation:
                     # Reverse complement the sequence if orientation is negative
@@ -1310,7 +1011,7 @@ def main():
     
     # Define output filenames based on the output directory
     output_csv = os.path.join(args.outdir, args.basename + ".multiplicities.csv")
-    output_fasta = os.path.join(args.outdir, args.basename + ".fasta")
+    output_fasta = os.path.join(args.outdir, args.basename + ".hpc.fasta")
     output_gaf = os.path.join(args.outdir, args.basename + ".gaf")
 
     # Write multiplicities to CSV
@@ -1324,13 +1025,13 @@ def main():
     best_path, best_score = optimize_paths(multi_graph, boundary_nodes, original_graph, args.num_initial_paths, args.max_iterations, args.early_stopping_limit, alignment_scorer)
     logging.info("Path optimizing finished.")
     if best_path:
-        best_path_str = get_gaf_string(best_path)
-        logging.info(f"Found traversal\t{best_path_str}")
+        best_path_str = get_gaf_string(best_path, node_mapper)
+        logging.info(f"Found traversal\t{best_path_str}")   
 
         rc_vertex_map = {}
         for vertex in multi_graph.nodes():
             rc_vertex_map[vertex] = get_canonical_rc_vertex(vertex, original_graph)
-        get_synonymous_changes(best_path, rc_vertex_map,alignment_scorer)
+        
         
         # Output FASTA file
         logging.info(f"Writing best path to {output_fasta} and gaf to {output_gaf}")

@@ -2,26 +2,19 @@
 
 import logging
 import random
-import dataclasses
 import networkx as nx
 
-
-@dataclasses.dataclass
-class EdgeDescription:
-    source: int
-    target: int
-    #possibly string is faster here?
-    original_node: int
+from logging_utils import log_assert
+from node_mapper import NodeIdMapper
+from path_supplementary import EdgeDescription, get_gaf_path, get_gaf_string, rc_path
 
 
 class PathOptimizer:
-    def __init__(self, graph, start_vertex, seed, node_id_to_name_safe_func=None, get_gaf_string_func=None, name_to_node_id_dict=None):
+    def __init__(self, graph, start_vertex, seed, node_mapper=None):
         self.graph = graph
         self.start_vertex = start_vertex
         self.seed = seed
-        self.node_id_to_name_safe = node_id_to_name_safe_func
-        self.get_gaf_string = get_gaf_string_func
-        self.name_to_node_id = name_to_node_id_dict or {}
+        self.node_mapper = node_mapper
         self.traversing_path = self.generate_random_eulerian_path()
         #Storing for debug only
         
@@ -68,8 +61,7 @@ class PathOptimizer:
 
                 # Move to next node
             logging.info(f"Randomized Eulerian path found with seed {self.seed} with {len(path)} nodes !")
-            if self.get_gaf_string:
-                logging.debug (f"{self.get_gaf_string(path)}")
+            logging.debug (f"{get_gaf_string(path, self.node_mapper)}")
             return path
         else:
             logging.error(f"Path not found from {self.start_vertex}")
@@ -134,9 +126,9 @@ class PathOptimizer:
             #We can do inversion
             if rc_vertex_map[start_node] == end_node and iter % 2 == 0:
                 # not allowing to invert AUX node            
-                if "AUX" in self.name_to_node_id:
+                if self.node_mapper and self.node_mapper.has_name("AUX"):
                     forbidden = False
-                    aux_id = self.name_to_node_id["AUX"]
+                    aux_id = self.node_mapper.get_id_for_name("AUX")
                     for ind in range(i, j + 1):
                         if self.traversing_path[ind].original_node == aux_id:
                             forbidden = True
@@ -147,9 +139,8 @@ class PathOptimizer:
                 # Invert the interval from i to j
                 new_path = self.traversing_path[:i] + self.rc_path(self.traversing_path[i:j + 1], rc_vertex_map) + self.traversing_path[j + 1:]
 
-                logging.debug(f"{_ + 1} attempts to generate random inversion")
-                if self.get_gaf_string:
-                    logging.debug(f"{self.get_gaf_string(new_path)}")
+                logging.debug(f"{_ + 1} attempts to generate random inversion")                
+                logging.debug(f"{get_gaf_string(new_path, self.node_mapper)}")
                 return new_path
 
             # Find k where path[k].source == start_node and k > j
@@ -175,11 +166,118 @@ class PathOptimizer:
                 + self.traversing_path[l + 1:]
             )
             logging.debug(f"{_ + 1} attempts to generate random swap")
-            if self.get_gaf_string:
-                logging.debug(f"{self.get_gaf_string(new_path)}")
-            return new_path    
+            logging.debug(f"{get_gaf_string(new_path, self.node_mapper)}")
+            return new_path
         logging.warning("Failed to find valid intervals to swap")
-        if self.get_gaf_string:
-            logging.warning(f"{self.get_gaf_string(self.traversing_path)}")
+        logging.warning(f"{get_gaf_string(self.traversing_path, self.node_mapper)}")
         #exit(9)
         return self.traversing_path
+
+    def get_synonymous_changes(self, path, rc_vertex_map, alignment_scorer):
+        """
+        Find synonymous changes in the path - intervals that can be swapped or inverted 
+        without changing the alignment score.
+        """
+        # Import necessary functions that might be needed
+        
+        #some copy-paste
+        path_length = len(path)    
+        # Pre-build index of matching start/end positions for faster lookup
+        start_positions = {}
+        end_positions = {}
+        final_score = alignment_scorer.score_corasick(path)
+        for idx, edge_descr in enumerate(path):
+            if edge_descr.source not in start_positions:
+                start_positions[edge_descr.source] = []
+            start_positions[edge_descr.source].append(idx)
+
+            if edge_descr.target not in end_positions:
+                end_positions[edge_descr.target] = []
+            end_positions[edge_descr.target].append(idx)
+
+        swappable_intervals = set()
+        for start_v in start_positions:
+            for end_v in end_positions:
+                for first_start_ind in range(len(start_positions[start_v])-1):
+                    for second_start_ind in range(first_start_ind + 1, len(start_positions[start_v])):
+                        for first_end_ind in range(len(end_positions[end_v]) - 1):
+                            for second_end_ind in range(first_end_ind + 1, len(end_positions[end_v])):
+                                #valid swap
+                                start_path_first_ind = start_positions[start_v][first_start_ind]
+                                end_path_first_ind = end_positions[end_v][first_end_ind]
+                                start_path_second_ind = start_positions[start_v][second_start_ind]
+                                end_path_second_ind = end_positions[end_v][second_end_ind]
+                                #for an interval start and end can be same - one node paths. But different intervals should not overlap
+                                if end_path_first_ind < start_path_first_ind or end_path_second_ind < start_path_second_ind or start_path_second_ind <= end_path_first_ind:                                
+                                    continue
+                                first_gaf_fragment = get_gaf_path(path[start_path_first_ind:end_path_first_ind+1], self.node_mapper)
+                                second_gaf_fragment = get_gaf_path(path[start_path_second_ind:end_path_second_ind+1], self.node_mapper)
+                                logging.debug(first_gaf_fragment)
+                                logging.debug(second_gaf_fragment)
+                                if first_gaf_fragment == second_gaf_fragment:
+                                    logging.debug(f"Found synonymous change: {first_gaf_fragment} positions {start_path_first_ind}-{end_path_first_ind} and {start_path_second_ind}-{end_path_second_ind}, not checking")
+                                    continue
+                                new_path = (
+                                path[:start_path_first_ind]
+                                    + path[start_path_second_ind:end_path_second_ind + 1]
+                                    + path[end_path_first_ind + 1:start_path_second_ind]
+                                    + path[start_path_first_ind:end_path_first_ind + 1]
+                                    + path[end_path_second_ind + 1:]
+                                )
+                                log_assert((len(new_path) == len(path)), f"New path length does not match original path len = {len(path)} indices {start_path_first_ind}-{end_path_first_ind} and {start_path_second_ind}-{end_path_second_ind}")
+                                new_score = alignment_scorer.score_corasick(new_path)
+                                log_assert(new_score <= final_score, "New path score is greater than original path score")
+                                logging.debug(f"New path score: {new_score}, original path score: {final_score} positions {start_path_first_ind}-{end_path_first_ind} and {start_path_second_ind}-{end_path_second_ind}")
+                                if new_score < final_score:
+                                    logging.debug(f"Swap {start_path_first_ind}-{end_path_first_ind} with {start_path_second_ind}-{end_path_second_ind} decreases score, continuing")
+                                elif new_score == final_score:
+
+                                    left_shift = 0
+                                    right_shift = 0
+                                    while first_gaf_fragment[left_shift] == second_gaf_fragment[left_shift]:
+                                        left_shift += 1
+                                    while first_gaf_fragment[-right_shift-1] == second_gaf_fragment[-right_shift-1]:
+                                        right_shift += 1
+                                    logging.debug(f"Swap {start_path_first_ind}-{end_path_first_ind} with {start_path_second_ind}-{end_path_second_ind} does not change score")
+                                    logging.debug(f"Tuned intervals {start_path_first_ind + left_shift}-{end_path_first_ind - right_shift} with {start_path_second_ind + left_shift}-{end_path_second_ind - right_shift}")
+                                    swappable_intervals.add((start_path_first_ind + left_shift, end_path_first_ind - right_shift, start_path_second_ind + left_shift, end_path_second_ind - right_shift))
+                                    logging.debug(f"Edge paths are {first_gaf_fragment} and {second_gaf_fragment}")
+        invertable_intervals = set()
+        for start_v in start_positions:
+            rc_start_v = rc_vertex_map[start_v]
+            if not rc_start_v in end_positions:
+                continue
+            for start_path_ind in start_positions[start_v]:
+                for end_path_ind in end_positions[rc_start_v]:
+                    #check if we can invert a self-rc interval
+                    if start_path_ind < end_path_ind:
+                        #invert the interval
+                        # Use the static rc_path from tangle_traverser for this calculation
+                        inverted_path = rc_path(path[start_path_ind:end_path_ind + 1], rc_vertex_map)
+                        if get_gaf_string(inverted_path, self.node_mapper) == get_gaf_string(path[start_path_ind:end_path_ind + 1], self.node_mapper):
+                            logging.debug(f"Found equivalent inverted path: {get_gaf_string(inverted_path, self.node_mapper)}")
+                            continue
+                        new_path = path[:start_path_ind] + rc_path(path[start_path_ind:end_path_ind + 1], rc_vertex_map) + path[end_path_ind + 1:]
+                        new_score = alignment_scorer.score_corasick(new_path)
+                        log_assert(new_score <= final_score, "New path score is greater than original path score")
+                        logging.debug(f"New path score: {new_score}, original path score: {final_score} positions {start_path_ind}-{end_path_ind}")
+                        if new_score < final_score:
+                            logging.debug(f"Inversion {start_path_ind}-{end_path_ind} decreases score, continuing")
+                        elif new_score == final_score:
+                            invertable_intervals.add((start_path_ind, end_path_ind))
+                            logging.debug(f"Inversion {start_path_ind}-{end_path_ind} does not change score")
+                            logging.debug(f"Edge paths are {get_gaf_string(path[start_path_ind:end_path_ind + 1], self.node_mapper)}")
+        #TODO: check for possible inversions
+        if len(invertable_intervals) + len(swappable_intervals) > 0:
+            if len(swappable_intervals) > 0:
+                logging.warning(f"Total {len(swappable_intervals)} path swaps with the same score found!")
+                for first_start, first_end, second_start, second_end in swappable_intervals:
+                    logging.info(f"Swappable interval: {first_start}-{first_end} with {second_start}-{second_end}")
+                    logging.info(f"Subpaths {get_gaf_string(path[first_start:first_end + 1], self.node_mapper)} and {get_gaf_string(path[second_start:second_end + 1], self.node_mapper)}")
+            if len(invertable_intervals) > 0:
+                logging.warning(f"Total {len(invertable_intervals)} path inversions with the same score found!")
+                for start, end in invertable_intervals:
+                    logging.info(f"Invertable interval: {start}-{end}")
+                    logging.info(f"Subpath {get_gaf_string(path[start:end + 1], self.node_mapper)}")
+        else:
+            logging.info("No equivalent paths found")
