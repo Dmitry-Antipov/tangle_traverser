@@ -18,9 +18,13 @@ from path_supplementary import EdgeDescription, get_gaf_path, get_gaf_string, rc
 from alignment_scorer import AlignmentScorer
 from logging_utils import setup_logging, log_assert
 from node_mapper import NodeIdMapper
+from MIP_optimizer import MIPOptimizer
 
 # Create a global node mapper instance
 node_mapper = NodeIdMapper()
+
+# Create a global MIP optimizer instance
+mip_optimizer = MIPOptimizer(node_mapper)
 
 #allowed median coverage range in range [median_unique/MEDIAN_COVERAGE_VARIATION, median_unique * MEDIAN_COVERAGE_VARIATION]
 DETECTED_MEDIAN_COVERAGE_VARIATION = 1.5
@@ -31,77 +35,7 @@ UNIQUE_BORDER_LENGTH = 200000
 
 #Multiplicities detection magic is here
 #TODO: length-based weights?
-def solve_MIP(equations, nonzeros, boundary_values, coverages, unique_coverage_range):
-    #last element in equation - amount of boundary nodes
 
-    prob = pulp.LpProblem("Minimize_Deviation", pulp.LpMinimize)    
-    # Define multiplicity variables    
-
-    keys = set()
-    abs_keys = set()
-    for eq in equations:
-        keys.update(eq[0])
-        keys.update(eq[1])
-        for ind in (0, 1):
-            for j in eq[ind]:
-                abs_keys.add(abs(j))
-    for key in abs_keys:
-        log_assert(key in keys and -key in keys, f"One of the keys {node_mapper.node_id_to_name_safe(key)} or {node_mapper.node_id_to_name_safe(-key)} is not in equations {equations}")
-        log_assert(key in coverages , f"Key {node_mapper.node_id_to_name_safe(key)} is not in coverages")
-
-    #TODO: we can check for hairpin presence just here.
-    x_vars = {i: pulp.LpVariable(f"x_{i}", cat="Integer") for i in keys}
-
-    # Constraints: x_i = x_j + x_k + x_l
-    # for lhs, rhs in equations.items():
-    # prob += x_vars[lhs] == sum(x_vars[j] for j in rhs)
-    for eq in equations:
-        prob += sum(x_vars[j] for j in eq[0])  == sum(x_vars[j] for j in eq[1]) 
-
-    for x_var in x_vars:
-        prob += x_vars[x_var] >= 0
-        if x_var > 0 and x_var in nonzeros:
-            prob += x_vars[x_var] + x_vars[-x_var] >= 1
-
-    #boundary nodes set
-    for x_var in boundary_values:
-        prob += x_vars[x_var] == boundary_values[x_var]
-
-
-    # Define continuous variables for absolute deviation |x_i - a_i|
-    d_vars = {i: pulp.LpVariable(f"d_{i}", lowBound=0, cat="Continuous") for i in coverages}   
-    inv_unique_coverage = pulp.LpVariable("uniqueness_multiplier", lowBound=1/unique_coverage_range[1], upBound=1/unique_coverage_range[0], cat="Continuous")
-    for i in abs_keys:
-        prob += d_vars[i] >= (x_vars[i] + x_vars[-i]) - coverages[i] * inv_unique_coverage
-        prob += d_vars[i] >= coverages[i] * inv_unique_coverage - x_vars[i] - x_vars[-i]
-    # Objective function: minimize sum of absolute deviations
-    objective = pulp.lpSum(d_vars[i] for i in abs_keys)
-    prob += objective
-
-    logging.debug("Linear programming problem:")
-    logging.debug(f"Objective: {prob.objective}")
-    for constraint in prob.constraints.values():
-        logging.debug(f"Constraint: {constraint}")
-    for var in x_vars.values():
-        logging.debug(f"Variable: {var.name}, LowBound: {var.lowBound}, Cat: {var.cat}")
-
-    # MIP magic
-    prob.solve()
-    result = {}    
-    
-    if pulp.LpStatus[prob.status] != "Optimal":
-        logging.warning("MIP did not find an optimal solution.")
-    result = {i: int(pulp.value(x_vars[i])) for i in keys}
-    
-    # Convert result to use node names for logging
-    result_with_names = {node_mapper.node_id_to_name_safe(i): result[i] for i in result}
-    logging.info(f"Found multiplicities from MIP {result_with_names}")
-    score = pulp.value(objective)  
-    detected_coverage = 1/pulp.value(inv_unique_coverage)
-    logging.info (f"Unique coverage for the best MIP solution {detected_coverage}, solution score {score}")
-    if abs(detected_coverage - unique_coverage_range[0]) < 0.01 or abs(detected_coverage - unique_coverage_range[1]) < 0.01:
-        logging.info (f"Warning, detected best coverage is close to the allowed unique coverage borders{unique_coverage_range}")                                                                            
-    return result
        
 def parse_gfa(file_path):
     """
@@ -445,10 +379,8 @@ def get_traversable_subgraph(multi_dual_graph: nx.MultiDiGraph, border_nodes, or
     # If there are 4 border nodes, we need to find the correct end vertex and add the auxiliary connection
     if border_nodes_count == 2:
         aux_node_str = "AUX"
-        aux_int_id = node_mapper.parse_node_id(aux_node_str)  
-        multi_dual_graph.add_edge(matching_end_vertex, start_vertices[1], original_node=aux_int_id, key = f"{aux_int_id}_0")
-
-
+        aux_int_id = node_mapper.parse_node_id(aux_node_str)
+        multi_dual_graph.add_edge(matching_end_vertex, start_vertices[1], original_node=aux_int_id, key=f"{aux_int_id}_0")
         logging.info(f"Added auxiliary edge from {node_mapper.node_id_to_name_safe(matching_end_vertex_node)} to {node_mapper.node_id_to_name_safe(start_vertices[1][1])}")
         reachable_verts = nx.descendants(multi_dual_graph, start_vertex)
         # Add the start_node itself
@@ -701,6 +633,53 @@ def write_multiplicities(output_file, solution, cov):
                 out_file.write(f"{node_mapper.node_id_to_name[node_id]}\t{cov_value}\t{mult_value}\n")
     logging.info(f"Wrote multiplicity solutions to {output_file}")
 
+
+def identify_boundary_nodes(args, original_graph, tangle_nodes):
+    if args.boundary_nodes:
+        boundary_nodes = {}
+        for line in open(args.boundary_nodes):
+            # Parse the line and extract boundary node pairs
+            # map incoming->matching outgoing
+            parts = line.strip().split()
+            if len(parts) == 2:
+                node1 = node_mapper.parse_node_id(parts[0])
+                is_incoming = False
+                for next_node in original_graph.successors(node1):
+                    if next_node in tangle_nodes:
+                        is_incoming = True
+                        break
+                if not is_incoming:
+                    node1 = -node1
+                node2 = node_mapper.parse_node_id(parts[1])
+                is_outgoing = False
+                for prev in original_graph.predecessors(node2):
+                    if prev in tangle_nodes:
+                        is_outgoing = True
+                        break
+                if not is_outgoing:
+                    node2 = -node2
+                boundary_nodes[node1] = node2
+        return boundary_nodes
+    else:
+        out_boundary_nodes = set()
+        in_boundary_nodes = set()
+        for first in original_graph.nodes:
+            for second in original_graph.successors(first):
+                if first in tangle_nodes and second not in tangle_nodes:
+                    out_boundary_nodes.add(second)
+                elif second in tangle_nodes and first not in tangle_nodes:
+                    in_boundary_nodes.add(first)
+        log_assert(len(out_boundary_nodes) == 2 and len(in_boundary_nodes) == 2, 
+                    f"Autodetection works only for 1-1 tangles, detected out_boundary: {[node_mapper.node_id_to_name_safe(n) for n in out_boundary_nodes]}, in_boundary: {[node_mapper.node_id_to_name_safe(n) for n in in_boundary_nodes]}. Specify boundary node pairs manually")
+        res = {}
+        start = max(in_boundary_nodes)
+        end = max(out_boundary_nodes)
+        log_assert(abs(start) != abs(end), 
+                    f"Start and end boundary nodes should be different, got {node_mapper.node_id_to_name_safe(start)} and {node_mapper.node_id_to_name_safe(end)}")
+        res[start] = end
+        return res
+
+
 # Update the optimize_paths function to use command-line options for default parameters
 def optimize_paths(multi_graph, boundary_nodes, original_graph, num_initial_paths, max_iterations, early_stopping_limit, alignment_scorer: AlignmentScorer):
     """Optimize Eulerian paths."""
@@ -750,122 +729,6 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, num_initial_path
     logging.info(f"Optimization completed. Best score: {best_score}.")
     pathOptimizer.get_synonymous_changes(best_path, alignment_scorer)
     return best_path, best_score
-
-#Messy stuff excluded from main
-def generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original_graph, boundary_nodes, directed = False):
-    junction_equations = []    
-    used = set()
-    extended_tangle = tangle_nodes.copy()
-    #format: used ins to corresponding used outs
-    all_boundary_nodes = set()
-    for b in boundary_nodes:
-        all_boundary_nodes.add(abs(b))
-        all_boundary_nodes.add(-abs(b))
-        all_boundary_nodes.add(abs(boundary_nodes[b]))
-        all_boundary_nodes.add(-abs(boundary_nodes[b]))
-    extended_tangle.update(all_boundary_nodes)
-    canonic_name = {}
-    for node in extended_tangle:
-        if directed:
-            canonic_name[node] = node
-        else:
-            canonic_name[node] = abs(node)
-    # Generate equations
-    for from_node in extended_tangle:
-        if from_node in used:
-            continue
-        arr = [[],[]]
-        back_node = ""
-        bad_extension = 0
-        for to_node in original_graph.successors(from_node):
-            back_node = to_node
-            if not directed:
-                used.add(-to_node)
-            if to_node in extended_tangle:
-                arr[1].append(canonic_name[to_node])
-            else:
-                bad_extension = to_node
-                break
-           
-        if  bad_extension != 0:
-            if not (from_node in all_boundary_nodes):
-                logging.error(f"Somehow jumped over boundary nodes {node_mapper.node_id_to_name_safe(from_node)} {node_mapper.node_id_to_name_safe(back_node)} { boundary_nodes}")
-                exit()
-            else:
-                continue
-        if back_node != "":
-            for alt_start_node in original_graph.predecessors(back_node):
-                used.add(alt_start_node)
-                if alt_start_node in extended_tangle:
-                    arr[0].append(canonic_name[alt_start_node])
-                else:
-                    bad_extension = alt_start_node
-                    break
-        if bad_extension != 0:
-            logging.error(f"Somehow jumped over boundary nodes (backwards) {node_mapper.node_id_to_name_safe(alt_start_node)} {node_mapper.node_id_to_name_safe(bad_extension)} { boundary_nodes}")
-            exit()
-        junction_equations.append(arr)
-
-    must_use_nodes = []
-    coverage = {}
-    for node in nor_nodes:        
-        coverage[node] = float(cov[node]) #/ median_unique
-        logging.debug(f"Coverage of {node_mapper.node_id_to_name_safe(node)} : {coverage[node]}")
-        if coverage[node] / median_unique >= 0.5:
-            must_use_nodes.append(node)
-    boundary_values = {}
-    for b in boundary_nodes:
-        boundary_values[b] = 1
-        boundary_values[boundary_nodes[b]] = 1
-        boundary_values[-b] = 0
-        boundary_values[-boundary_nodes[b]] = 0
-        coverage[abs(b)] = float(cov[abs(b)]) 
-        coverage[abs(boundary_nodes[b])] = float(cov[abs(boundary_nodes[b])])
-    return junction_equations, must_use_nodes, coverage, boundary_values
-
-
-def identify_boundary_nodes(args, original_graph, tangle_nodes):
-    if args.boundary_nodes:
-        boundary_nodes = {}
-        for line in open (args.boundary_nodes):
-            # Parse the line and extract boundary node pairs
-            #map incoming->matching outgoing
-            parts = line.strip().split()
-            if len(parts) == 2:
-                node1 = node_mapper.parse_node_id(parts[0])
-                is_incoming = False
-                for next in original_graph.successors(node1):
-                    if next in tangle_nodes:
-                        is_incoming = True
-                        break
-                if not is_incoming:
-                    node1 = -node1
-                node2 = node_mapper.parse_node_id(parts[1])
-                is_outgoing = False
-                for prev in original_graph.predecessors(node2):
-                    if prev in tangle_nodes:
-                        is_outgoing = True
-                        break
-                if not is_outgoing:
-                    node2 = -node2
-                boundary_nodes[node1] = node2
-        return boundary_nodes
-    else:
-        out_boundary_nodes = set()
-        in_boundary_nodes = set()
-        for first in original_graph.nodes:
-            for second in original_graph.successors(first):
-                if first in tangle_nodes and second not in tangle_nodes:
-                    out_boundary_nodes.add(second)
-                elif second in tangle_nodes and first not in tangle_nodes:
-                    in_boundary_nodes.add(first)
-        log_assert(len(out_boundary_nodes) == 2 and len(in_boundary_nodes) == 2, f"Autodetection works only for 1-1 tangles, detected out_boundary: {[node_mapper.node_id_to_name_safe(n) for n in out_boundary_nodes]}, in_boundary: {[node_mapper.node_id_to_name_safe(n) for n in in_boundary_nodes]}. Specify boundary node pairs manually")
-        res = {}
-        start = max(in_boundary_nodes)
-        end = max(out_boundary_nodes)
-        log_assert(abs(start) != abs(end), f"Start and end boundary nodes should be different, got {node_mapper.node_id_to_name_safe(start)} and {node_mapper.node_id_to_name_safe(end)}")
-        res[start] = end
-        return res
 
 #Only UNIQUE_BORDER_LENGTH (=200K) suffix/prefix for border unique nodes used in fasta, but its HPC anyways...
 def output_path(best_path, original_graph, output_fasta, output_gaf):
@@ -1005,9 +868,9 @@ def main():
     #Shit is hidden here
     logging.info("Starting multiplicity counting...")
     #TODO: instead of a_values we just use coverage
-    equations, nonzeros, a_values, boundary_values = generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original_graph, boundary_nodes, directed=True)
+    equations, nonzeros, a_values, boundary_values = mip_optimizer.generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original_graph, boundary_nodes, directed=True)
     #Failed to generate suboptimal solutions yet
-    best_solution = solve_MIP(equations, nonzeros, boundary_values, a_values, median_unique_range)
+    best_solution = mip_optimizer.solve_MIP(equations, nonzeros, boundary_values, a_values, median_unique_range)
     
     # Define output filenames based on the output directory
     output_csv = os.path.join(args.outdir, args.basename + ".multiplicities.csv")

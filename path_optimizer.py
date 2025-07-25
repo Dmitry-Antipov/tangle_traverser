@@ -22,9 +22,7 @@ class PathOptimizer:
         #indices from vertices to path positions
         self.start_positions = {}
         self.end_positions = {}
-        
-        
-
+                
     def generate_random_eulerian_path(self):
         #Supplementary for eulerian path construction: selects random outgoing edge, returns it, removes it from graph
         def next_element(temp_graph, current_vertex):
@@ -148,19 +146,15 @@ class PathOptimizer:
                 j = random.randint(i + 1,  path_length - 2) 
                 end_vertex = self.traversing_path[j].target
 
-                # Find k where path[k].source == start_node and k > j
                 k_candidates = [k for k in self.start_positions.get(start_vertex, []) if k > j]
                 if not k_candidates:
                     continue
-                # Choose k randomly without temperature weighting
                 k = random.choice(k_candidates)
 
-                # Find l such that path[l].target == end_node and l > k
                 l_candidates = [l for l in self.end_positions.get(end_vertex, []) if l > k]
                 if not l_candidates:
                     continue
                 
-                # Choose l randomly without temperature weighting
                 l = random.choice(l_candidates)
                 # Swap the intervals
                 new_path = (
@@ -175,9 +169,9 @@ class PathOptimizer:
                 return new_path
         logging.warning("Failed to find valid intervals to swap")
         logging.warning(f"{get_gaf_string(self.traversing_path, self.node_mapper)}")
-        #exit(9)
         return self.traversing_path
 
+    #Only for logging
     def get_synonymous_changes(self, path, alignment_scorer):
         self.update_start_end_positions()
         swappable_intervals = set()
