@@ -10,11 +10,12 @@ from path_supplementary import EdgeDescription, get_gaf_path, get_gaf_string, rc
 
 
 class PathOptimizer:
-    def __init__(self, graph, start_vertex, seed, node_mapper=None):
+    def __init__(self, graph, start_vertex, seed, node_mapper, rc_vertex_map):
         self.graph = graph
         self.start_vertex = start_vertex
         self.seed = seed
         self.node_mapper = node_mapper
+        self.rc_vertex_map = rc_vertex_map
         self.traversing_path = self.generate_random_eulerian_path()
 
         #indices from vertices to path positions
@@ -77,21 +78,13 @@ class PathOptimizer:
             exit(1)
             return []
 
-    def rc_path(self, path, rc_vertex_map):
-        new_path = []
-        for edge in path:
-            new_u = rc_vertex_map[edge.source]
-            new_v = rc_vertex_map[edge.target]
-            new_path.append(EdgeDescription(new_v, new_u, -edge.original_node))
-        new_path.reverse()
-        return new_path
-
     def get_path(self):
         return self.traversing_path
 
     def set_path(self, new_path):
         self.traversing_path = new_path
 
+    #TODO: should happen in setter for path
     def update_start_end_positions(self):
         self.start_positions = {}
         self.end_positions = {}
@@ -106,7 +99,7 @@ class PathOptimizer:
             self.end_positions[edge_descr.target].append(idx)
         return
 
-    def get_random_change(self, iter, rc_vertex_map):
+    def get_random_change(self, iter):
         """
         Finds two non-overlapping intervals in the Eulerian path that start and end at the same vertices
         and swaps them to create a new path or inverts a random self-rc interval
@@ -134,8 +127,8 @@ class PathOptimizer:
             start_vertex = self.traversing_path[i].source
             end_vertex = self.traversing_path[j].target
             #We can do inversion
-            if rc_vertex_map[start_vertex] == end_vertex and iter % 2 == 0:
-                # not allowing to invert AUX node            
+            if self.rc_vertex_map[start_vertex] == end_vertex and iter % 2 == 0:
+                # not allowing to invert AUX node
                 if self.node_mapper and self.node_mapper.has_name("AUX"):
                     forbidden = False
                     aux_id = self.node_mapper.get_id_for_name("AUX")
@@ -147,7 +140,7 @@ class PathOptimizer:
                         logging.debug(f"Skipping inversion due to AUX node presence between {i} and {j}")
                         continue
                 # Invert the interval from i to j
-                new_path = self.traversing_path[:i] + self.rc_path(self.traversing_path[i:j + 1], rc_vertex_map) + self.traversing_path[j + 1:]
+                new_path = self.traversing_path[:i] + rc_path(self.traversing_path[i:j + 1], self.rc_vertex_map) + self.traversing_path[j + 1:]
 
                 logging.debug(f"{_ + 1} attempts to generate random inversion")                
                 logging.debug(f"{get_gaf_string(new_path, self.node_mapper)}")
@@ -183,7 +176,7 @@ class PathOptimizer:
         #exit(9)
         return self.traversing_path
 
-    def get_synonymous_changes(self, path, rc_vertex_map, alignment_scorer):
+    def get_synonymous_changes(self, path, alignment_scorer):
         self.update_start_end_positions()
         swappable_intervals = set()
         final_score = alignment_scorer.score_corasick(path)
@@ -235,7 +228,7 @@ class PathOptimizer:
                                     logging.debug(f"Edge paths are {first_gaf_fragment} and {second_gaf_fragment}")
         invertable_intervals = set()
         for start_v in self.start_positions:
-            rc_start_v = rc_vertex_map[start_v]
+            rc_start_v = self.rc_vertex_map[start_v]
             if not rc_start_v in self.end_positions:
                 continue
             for start_path_ind in self.start_positions[start_v]:
@@ -244,11 +237,11 @@ class PathOptimizer:
                     if start_path_ind < end_path_ind:
                         #invert the interval
                         # Use the static rc_path from tangle_traverser for this calculation
-                        inverted_path = rc_path(path[start_path_ind:end_path_ind + 1], rc_vertex_map)
+                        inverted_path = rc_path(path[start_path_ind:end_path_ind + 1], self.rc_vertex_map)
                         if get_gaf_string(inverted_path, self.node_mapper) == get_gaf_string(path[start_path_ind:end_path_ind + 1], self.node_mapper):
                             logging.debug(f"Found equivalent inverted path: {get_gaf_string(inverted_path, self.node_mapper)}")
                             continue
-                        new_path = path[:start_path_ind] + rc_path(path[start_path_ind:end_path_ind + 1], rc_vertex_map) + path[end_path_ind + 1:]
+                        new_path = path[:start_path_ind] + rc_path(path[start_path_ind:end_path_ind + 1], self.rc_vertex_map) + path[end_path_ind + 1:]
                         new_score = alignment_scorer.score_corasick(new_path)
                         log_assert(new_score <= final_score, "New path score is greater than original path score")
                         logging.debug(f"New path score: {new_score}, original path score: {final_score} positions {start_path_ind}-{end_path_ind}")

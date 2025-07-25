@@ -718,7 +718,7 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, num_initial_path
         if not subgraph_to_traverse:
             logging.warning(f"No Eulerian path found for seed {seed}.")
             continue
-        pathOptimizer = PathOptimizer(subgraph_to_traverse, start_vertex, seed, node_mapper)
+        pathOptimizer = PathOptimizer(subgraph_to_traverse, start_vertex, seed, node_mapper, rc_vertex_map)
 
         current_path = pathOptimizer.get_path()
         current_score = alignment_scorer.score_corasick(current_path)
@@ -730,7 +730,7 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, num_initial_path
                 logging.info(f"Early stopping for seed {seed} on iteration {i} after {iterations_since_improvement} iterations without improvement.")
                 break
             
-            new_path = pathOptimizer.get_random_change(seed * max_iterations + i, rc_vertex_map)
+            new_path = pathOptimizer.get_random_change(seed * max_iterations + i)
             new_score = alignment_scorer.score_corasick(new_path)
             if new_score > current_score:
                 logging.info(f"Improved score for seed {seed} at iteration {i}: {current_score} -> {new_score}.")
@@ -748,7 +748,7 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, num_initial_path
             best_score = current_score
     
     logging.info(f"Optimization completed. Best score: {best_score}.")
-    pathOptimizer.get_synonymous_changes(best_path, rc_vertex_map, alignment_scorer)
+    pathOptimizer.get_synonymous_changes(best_path, alignment_scorer)
     return best_path, best_score
 
 #Messy stuff excluded from main
@@ -1021,16 +1021,13 @@ def main():
     #Now all sequence is stored in edges, junctions are new vertices
     dual_graph = create_dual_graph(original_graph)
     multi_graph = create_multi_dual_graph(dual_graph, best_solution, tangle_nodes, boundary_nodes, original_graph)
-    
+
     best_path, best_score = optimize_paths(multi_graph, boundary_nodes, original_graph, args.num_initial_paths, args.max_iterations, args.early_stopping_limit, alignment_scorer)
     logging.info("Path optimizing finished.")
     if best_path:
         best_path_str = get_gaf_string(best_path, node_mapper)
         logging.info(f"Found traversal\t{best_path_str}")   
 
-        rc_vertex_map = {}
-        for vertex in multi_graph.nodes():
-            rc_vertex_map[vertex] = get_canonical_rc_vertex(vertex, original_graph)
         
         
         # Output FASTA file
