@@ -1,7 +1,7 @@
 import logging
 import pulp
 import networkx as nx
-from logging_utils import log_assert
+from .logging_utils import log_assert
 
 
 #Initial refactoring, class can be

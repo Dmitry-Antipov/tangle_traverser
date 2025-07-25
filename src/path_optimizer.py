@@ -4,9 +4,9 @@ import logging
 import random
 import networkx as nx
 
-from logging_utils import log_assert
-from node_mapper import NodeIdMapper
-from path_supplementary import EdgeDescription, get_gaf_path, get_gaf_string, rc_path
+from .logging_utils import log_assert
+from .node_mapper import NodeIdMapper
+from .path_supplementary import EdgeDescription, get_gaf_path, get_gaf_string, rc_path
 
 
 class PathOptimizer:

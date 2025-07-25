@@ -13,12 +13,12 @@ import pstats
 import time
 import os
 import dataclasses
-from path_optimizer import PathOptimizer
-from path_supplementary import EdgeDescription, get_gaf_path, get_gaf_string, rc_path
-from alignment_scorer import AlignmentScorer
-from logging_utils import setup_logging, log_assert
-from node_mapper import NodeIdMapper
-from MIP_optimizer import MIPOptimizer
+from src.path_optimizer import PathOptimizer
+from src.path_supplementary import EdgeDescription, get_gaf_path, get_gaf_string, rc_path
+from src.alignment_scorer import AlignmentScorer
+from src.logging_utils import setup_logging, log_assert
+from src.node_mapper import NodeIdMapper
+from src.MIP_optimizer import MIPOptimizer
 
 # Create a global node mapper instance
 node_mapper = NodeIdMapper()

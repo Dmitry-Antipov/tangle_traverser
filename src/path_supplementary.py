@@ -2,7 +2,7 @@
 
 import dataclasses
 
-from node_mapper import NodeIdMapper
+from .node_mapper import NodeIdMapper
 
 @dataclasses.dataclass
 class EdgeDescription:
