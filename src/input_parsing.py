@@ -6,7 +6,7 @@ import argparse
 import logging
 import networkx as nx
 from .logging_utils import log_assert
-from .node_mapper import NodeIdMapper
+from .node_id_mapper import NodeIdMapper
 
 #allowed median coverage range in range [median_unique/MEDIAN_COVERAGE_VARIATION, median_unique * MEDIAN_COVERAGE_VARIATION]
 DETECTED_MEDIAN_COVERAGE_VARIATION = 1.5

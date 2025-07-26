@@ -2,6 +2,7 @@ import logging
 import pulp
 import networkx as nx
 from .logging_utils import log_assert
+from .node_id_mapper import NodeIdMapper
 
 
 #Initial refactoring, class can be

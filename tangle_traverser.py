@@ -1,22 +1,14 @@
 #!/usr/bin/env python3
 import sys
-import pulp
 import argparse
 import logging
-import statistics
-import networkx as nx
-import random
 import math
-import subprocess
-import cProfile
-import pstats
-import time
 import os
 from src.path_optimizer import PathOptimizer
-from src.path_supplementary import EdgeDescription, get_gaf_path, get_gaf_string, rc_path
+from src.path_supplementary import get_gaf_string
 from src.alignment_scorer import AlignmentScorer
-from src.logging_utils import setup_logging, log_assert
-from src.node_mapper import NodeIdMapper
+from src.logging_utils import setup_logging
+from src.node_id_mapper import NodeIdMapper
 from src.MIP_optimizer import MIPOptimizer
 from src.input_parsing import (
     parse_gfa, parse_gaf, read_tangle_nodes, read_coverage_file, 
@@ -29,20 +21,11 @@ from src.graph_transformation import (
     get_traversable_subgraph, write_multiplicities
 )
 
-# Create a global node mapper instance
-node_mapper = NodeIdMapper()
-
-# Create a global MIP optimizer instance
-mip_optimizer = MIPOptimizer(node_mapper)
-
-
-
-#Add this length (max) from the nodes neighboring tangle to fasta for better alignment
+# Create global instances
+node_id_mapper = NodeIdMapper()
+# Add this length (max) from the nodes neighboring tangle to fasta for better alignment
 UNIQUE_BORDER_LENGTH = 200000
 
-# All graph transformation functions moved to src/graph_transformation.py
-
-# Update the optimize_paths function to use command-line options for default parameters
 def optimize_paths(multi_graph, boundary_nodes, original_graph, num_initial_paths, max_iterations, early_stopping_limit, alignment_scorer: AlignmentScorer):
     """Optimize Eulerian paths."""
     best_path = None
@@ -50,16 +33,16 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, num_initial_path
     logging.info(f"Starting optimization with {num_initial_paths} initial paths, max {max_iterations} iterations per path.")
     rc_vertex_map = {}
     for vertex in multi_graph.nodes():
-        rc_vertex_map[vertex] = get_canonical_rc_vertex(vertex, original_graph, node_mapper)
+        rc_vertex_map[vertex] = get_canonical_rc_vertex(vertex, original_graph, node_id_mapper)
     for seed in range(num_initial_paths):
         logging.info(f"Generating initial path with seed {seed}.")
         #TODO: shouldn't it be outside cycle?
-        subgraph_to_traverse, start_vertex = get_traversable_subgraph(multi_graph, boundary_nodes, original_graph, seed, node_mapper)
+        subgraph_to_traverse, start_vertex = get_traversable_subgraph(multi_graph, boundary_nodes, original_graph, seed, node_id_mapper)
 
         if not subgraph_to_traverse:
             logging.warning(f"No Eulerian path found for seed {seed}.")
             continue
-        pathOptimizer = PathOptimizer(subgraph_to_traverse, start_vertex, seed, node_mapper, rc_vertex_map)
+        pathOptimizer = PathOptimizer(subgraph_to_traverse, start_vertex, seed, node_id_mapper, rc_vertex_map)
 
         current_path = pathOptimizer.get_path()
         current_score = alignment_scorer.score_corasick(current_path)
@@ -92,12 +75,11 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, num_initial_path
     pathOptimizer.get_synonymous_changes(best_path, alignment_scorer)
     return best_path, best_score
 
-#Only UNIQUE_BORDER_LENGTH (=200K) suffix/prefix for border unique nodes used in fasta, but its HPC anyways...
+# Only UNIQUE_BORDER_LENGTH (=200K) suffix/prefix for border unique nodes used in fasta, but its HPC anyways...
 def output_path(best_path, original_graph, output_fasta, output_gaf):
-
     aux = -1
-    if node_mapper.has_name("AUX"):
-        aux_id = node_mapper.get_id_for_name("AUX")
+    if node_id_mapper.has_name("AUX"):
+        aux_id = node_id_mapper.get_id_for_name("AUX")
         for i in range(len(best_path)):
             if abs(best_path[i].original_node) == aux_id:
                 aux = i
@@ -111,7 +93,7 @@ def output_path(best_path, original_graph, output_fasta, output_gaf):
     gaf_file = open(output_gaf, 'w')
     count = 0
     for path in paths:
-        gaf_file.write(f"traversal_{count}\t{get_gaf_string(path, node_mapper)}\n")
+        gaf_file.write(f"traversal_{count}\t{get_gaf_string(path, node_id_mapper)}\n")
         count += 1
     
     with open(output_fasta, 'w') as fasta_file:
@@ -185,31 +167,26 @@ def parse_arguments():
 
 def main():    
     args = parse_arguments()
-    
     os.makedirs(args.outdir, exist_ok=True)
-
     setup_logging(args)
     logging.debug(f"args: {args}")
     logging.info("Reading files...")
-    
-    # Create output directory if it doesn't exist
 
-    #TODO: save it somewhere, some connections added while parsing    
-    original_graph = parse_gfa(args.gfa_file, node_mapper)
+    #TODO: separate function to clean Z connection, save them somewhere
+    original_graph = parse_gfa(args.gfa_file, node_id_mapper)
     if args.coverage_file:
-        cov = read_coverage_file(args.coverage_file, node_mapper)
+        cov = read_coverage_file(args.coverage_file, node_id_mapper)
     else:
         cov = coverage_from_graph(original_graph)
-    #verifying that coverage matches the graph
-    #for rare cases coverage may be missing for some nodes, will update with median then 
-    verify_coverage(cov, original_graph, node_mapper)
+    # Verifying that coverage matches the graph
+    # For rare cases coverage may be missing for some nodes, will update with median then 
+    verify_coverage(cov, original_graph, node_id_mapper)
 
-    tangle_nodes = read_tangle_nodes(args, original_graph, node_mapper)    
-    #TODO: Do we really need it?
-    clean_tips(tangle_nodes, original_graph, node_mapper)
+    tangle_nodes = read_tangle_nodes(args, original_graph, node_id_mapper)    
+    clean_tips(tangle_nodes, original_graph, node_id_mapper)
     nor_nodes = {abs(node) for node in tangle_nodes}
     
-    boundary_nodes = identify_boundary_nodes(args, original_graph, tangle_nodes, node_mapper)
+    boundary_nodes = identify_boundary_nodes(args, original_graph, tangle_nodes, node_id_mapper)
 
     used_nodes = nor_nodes.copy()
     for b in boundary_nodes:
@@ -217,16 +194,15 @@ def main():
         used_nodes.add(abs(boundary_nodes[b]))
    
 
-    median_unique_range = calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nodes, node_mapper)    
+    median_unique_range = calculate_median_coverage(args, nor_nodes, original_graph, cov, boundary_nodes, node_id_mapper)    
     median_unique = math.sqrt(median_unique_range[0] * median_unique_range[1])
     filtered_alignment_file = os.path.join(args.outdir, f"{args.basename}.q{args.quality_threshold}.used_alignments.gaf")
-    alignments = parse_gaf(args.alignment, used_nodes, filtered_alignment_file, args.quality_threshold, node_mapper)
+    alignments = parse_gaf(args.alignment, used_nodes, filtered_alignment_file, args.quality_threshold, node_id_mapper)
     alignment_scorer = AlignmentScorer(alignments)
-    #Shit is hidden here
     logging.info("Starting multiplicity counting...")
-    #TODO: instead of a_values we just use coverage
+    # TODO: instead of a_values we just use coverage
+    mip_optimizer = MIPOptimizer(node_id_mapper)
     equations, nonzeros, a_values, boundary_values = mip_optimizer.generate_MIP_equations(tangle_nodes, nor_nodes, cov, median_unique, original_graph, boundary_nodes, directed=True)
-    #Failed to generate suboptimal solutions yet
     best_solution = mip_optimizer.solve_MIP(equations, nonzeros, boundary_values, a_values, median_unique_range)
     
     # Define output filenames based on the output directory
@@ -234,22 +210,18 @@ def main():
     output_fasta = os.path.join(args.outdir, args.basename + ".hpc.fasta")
     output_gaf = os.path.join(args.outdir, args.basename + ".gaf")
 
-    # Write multiplicities to CSV
-    write_multiplicities(output_csv, best_solution, cov, node_mapper)
+    write_multiplicities(output_csv, best_solution, cov, node_id_mapper)
 
-    
-    #Now all sequence is stored in edges, junctions are new vertices
-    dual_graph = create_dual_graph(original_graph, node_mapper)
-    multi_graph = create_multi_dual_graph(dual_graph, best_solution, tangle_nodes, boundary_nodes, original_graph, node_mapper)
+    # Now all sequence is stored in edges, junctions are new vertices
+    dual_graph = create_dual_graph(original_graph, node_id_mapper)
+    multi_graph = create_multi_dual_graph(dual_graph, best_solution, tangle_nodes, boundary_nodes, original_graph, node_id_mapper)
 
     best_path, best_score = optimize_paths(multi_graph, boundary_nodes, original_graph, args.num_initial_paths, args.max_iterations, args.early_stopping_limit, alignment_scorer)
     logging.info("Path optimizing finished.")
     if best_path:
-        best_path_str = get_gaf_string(best_path, node_mapper)
+        best_path_str = get_gaf_string(best_path, node_id_mapper)
         logging.info(f"Found traversal\t{best_path_str}")   
 
-        
-        
         # Output FASTA file
         logging.info(f"Writing best path to {output_fasta} and gaf to {output_gaf}")
         output_path(best_path, original_graph, output_fasta, output_gaf)
