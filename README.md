@@ -1,8 +1,8 @@
-Simple tangle traverser, generates "not terrible" traversal through repetitive genomic tangle that somehow matches coverage and the read alignment.
+TTT stands for Trivial Tangle Traverser. This tool generates "not terrible" traversals through repetitive genomic tangles that somehow matches coverage and the read alignment.
 
 For help run ./TTT.py --help
 
-Requires pulp, ahocorasick, networkx, statistics, logging   python libraries.
+Requires python &ge; 3.7 and dataclasses, pulp, ahocorasick, networkx, statistics, and logging python libraries.
 ## Usage
 
 ```bash
@@ -67,8 +67,10 @@ Be sure that you use the same graph for all the files (gfa, alignment, coverage,
 Tangle traversal does no scaffolding. So, when running on tangles with two genomic paths you should provide incoming and outgoing boundary node pairs with --boundary-nodes boundary_file.tsv
 
 File should be tab separated, in format:
-incoming_hap1_node  outgoing_hap1_node
-incoming_hap2_node  outgoing_hap2_node
+
+`incoming_hap1_node  outgoing_hap1_node`
+
+`incoming_hap2_node  outgoing_hap2_node`
 
 Tangle_traverer does not support tangles with more than 2 traversing paths (i.e. most of the rDNA tangles)
 
