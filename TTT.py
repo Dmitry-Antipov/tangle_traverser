@@ -13,37 +13,37 @@ from src.MIP_optimizer import MIPOptimizer
 from src.input_parsing import (
     parse_gfa, parse_gaf, read_tangle_nodes, read_coverage_file, 
     coverage_from_graph, verify_coverage, calculate_median_coverage,
-    identify_boundary_nodes, clean_tips, reverse_complement
+    identify_boundary_nodes, clean_tips
 )
 from src.graph_transformation import (
     get_canonical_rc_vertex,
     create_dual_graph, create_multi_dual_graph,
-    get_traversable_subgraph, write_multiplicities
+    get_traversable_subgraph
 )
 
 # Create global instances
 node_id_mapper = NodeIdMapper()
-# Add this length (max) from the nodes neighboring tangle to fasta for better alignment
-UNIQUE_BORDER_LENGTH = 200000
+mip_optimizer = MIPOptimizer(node_id_mapper)
 
-def optimize_paths(multi_graph, boundary_nodes, original_graph, num_initial_paths, max_iterations, early_stopping_limit, alignment_scorer: AlignmentScorer):
+def optimize_paths(multi_graph, boundary_nodes, original_graph, num_initial_paths, max_iterations, early_stopping_limit, alignment_scorer: AlignmentScorer, output_fasta, output_gaf):
     """Optimize Eulerian paths."""
     best_path = None
     best_score = -1
+    best_optimizer = None
     logging.info(f"Starting optimization with {num_initial_paths} initial paths, max {max_iterations} iterations per path.")
     rc_vertex_map = {}
     for vertex in multi_graph.nodes():
         rc_vertex_map[vertex] = get_canonical_rc_vertex(vertex, original_graph, node_id_mapper)
+    subgraph_to_traverse, start_vertex = get_traversable_subgraph(multi_graph, boundary_nodes, original_graph, node_id_mapper)    
+
+    if not subgraph_to_traverse:
+        logging.error(f"No Eulerian path found.")        
+    pathOptimizer = PathOptimizer(subgraph_to_traverse, start_vertex, node_id_mapper, rc_vertex_map)
+
     for seed in range(num_initial_paths):
         logging.info(f"Generating initial path with seed {seed}.")
-        #TODO: shouldn't it be outside cycle?
-        subgraph_to_traverse, start_vertex = get_traversable_subgraph(multi_graph, boundary_nodes, original_graph, seed, node_id_mapper)
-
-        if not subgraph_to_traverse:
-            logging.warning(f"No Eulerian path found for seed {seed}.")
-            continue
-        pathOptimizer = PathOptimizer(subgraph_to_traverse, start_vertex, seed, node_id_mapper, rc_vertex_map)
-
+        pathOptimizer.generate_random_eulerian_path(seed)
+        #TODO: most of this logic should go to PathOptimizer
         current_path = pathOptimizer.get_path()
         current_score = alignment_scorer.score_corasick(current_path)
         logging.info(f"Initial path score for seed {seed}: {current_score}.")
@@ -71,67 +71,19 @@ def optimize_paths(multi_graph, boundary_nodes, original_graph, num_initial_path
             best_path = current_path
             best_score = current_score
     
-    logging.info(f"Optimization completed. Best score: {best_score}.")
-    pathOptimizer.get_synonymous_changes(best_path, alignment_scorer)
-    return best_path, best_score
-
-# Only UNIQUE_BORDER_LENGTH (=200K) suffix/prefix for border unique nodes used in fasta, but its HPC anyways...
-def output_path(best_path, original_graph, output_fasta, output_gaf):
-    aux = -1
-    if node_id_mapper.has_name("AUX"):
-        aux_id = node_id_mapper.get_id_for_name("AUX")
-        for i in range(len(best_path)):
-            if abs(best_path[i].original_node) == aux_id:
-                aux = i
-                logging.debug(f"Found AUX at position {aux}")
-                break
-    if aux > 0:
-        paths = [best_path[:aux - 1], best_path[aux + 1:]]
+    logging.info(f"Optimization completed. Best score: {best_score}.")        
+    if best_path:
+        logging.info("Path optimizing finished.")
+        pathOptimizer.set_path(best_path)
+        pathOptimizer.get_synonymous_changes(alignment_scorer)
+        best_path_str = get_gaf_string(best_path, node_id_mapper)
+        logging.info(f"Found traversal\t{best_path_str}")   
+        # Output FASTA file
+        logging.info(f"Writing best path to {output_fasta} and gaf to {output_gaf}")
+        pathOptimizer.output_path(original_graph, output_fasta, output_gaf)
     else:
-        paths = [best_path]
-
-    gaf_file = open(output_gaf, 'w')
-    count = 0
-    for path in paths:
-        gaf_file.write(f"traversal_{count}\t{get_gaf_string(path, node_id_mapper)}\n")
-        count += 1
-    
-    with open(output_fasta, 'w') as fasta_file:
-        count = 0
-        for path in paths:
-
-            contig_sequence = ""
-            last_node = None
-            for i in range(len(path)):
-                edge_id = path[i].original_node
-                node_id = abs(edge_id)
-                orientation = edge_id > 0
-
-                # Retrieve the sequence from the graph
-                node_sequence = original_graph.nodes[node_id]['sequence']
-                if node_sequence == "*":
-                    logging.warning("Provided noseq assembly graph, no HPC fasta output possible")
-                    return
-                if not orientation:
-                    # Reverse complement the sequence if orientation is negative
-                    node_sequence = reverse_complement(node_sequence)
-
-                if i == 0:
-                    overlap = max (0, len(node_sequence) - UNIQUE_BORDER_LENGTH)                
-                else:                
-                    overlap = original_graph.get_edge_data(last_node, edge_id)['overlap']
-
-                if i == len(best_path) - 1:                            
-                    contig_sequence += node_sequence[overlap:min(len(node_sequence),UNIQUE_BORDER_LENGTH)]
-                else:
-                    contig_sequence += node_sequence[overlap:]
-                last_node = edge_id
-
-            # Write the contig to the FASTA file
-            fasta_file.write(f">traversal_{count}\n")
-            fasta_file.write(f"{contig_sequence}\n")
-            count += 1
-    logging.info("Fasta output finished")
+        logging.error("No valid path found during optimization.")
+    return best_path, best_score, best_optimizer
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Solve for integer multiplicities in a GFA tangle graph based on coverage.")
@@ -210,23 +162,13 @@ def main():
     output_fasta = os.path.join(args.outdir, args.basename + ".hpc.fasta")
     output_gaf = os.path.join(args.outdir, args.basename + ".gaf")
 
-    write_multiplicities(output_csv, best_solution, cov, node_id_mapper)
+    mip_optimizer.write_multiplicities(output_csv, best_solution, cov)
 
     # Now all sequence is stored in edges, junctions are new vertices
     dual_graph = create_dual_graph(original_graph, node_id_mapper)
     multi_graph = create_multi_dual_graph(dual_graph, best_solution, tangle_nodes, boundary_nodes, original_graph, node_id_mapper)
 
-    best_path, best_score = optimize_paths(multi_graph, boundary_nodes, original_graph, args.num_initial_paths, args.max_iterations, args.early_stopping_limit, alignment_scorer)
-    logging.info("Path optimizing finished.")
-    if best_path:
-        best_path_str = get_gaf_string(best_path, node_id_mapper)
-        logging.info(f"Found traversal\t{best_path_str}")   
-
-        # Output FASTA file
-        logging.info(f"Writing best path to {output_fasta} and gaf to {output_gaf}")
-        output_path(best_path, original_graph, output_fasta, output_gaf)
-
-
+    optimize_paths(multi_graph, boundary_nodes, original_graph, args.num_initial_paths, args.max_iterations, args.early_stopping_limit, alignment_scorer, output_fasta, output_gaf)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from importlib.resources import path
 import logging
 import random
 import networkx as nx
@@ -7,23 +8,30 @@ import networkx as nx
 from .logging_utils import log_assert
 from .node_id_mapper import NodeIdMapper
 from .path_supplementary import EdgeDescription, get_gaf_path, get_gaf_string, rc_path
+from .input_parsing import reverse_complement
+
+# Add this length (max) from the nodes neighboring tangle to fasta for better alignment
+UNIQUE_BORDER_LENGTH = 200000
 
 
 class PathOptimizer:
-    def __init__(self, graph, start_vertex, seed, node_mapper, rc_vertex_map):
+    def __init__(self, graph, start_vertex,  node_mapper, rc_vertex_map):
         self.graph = graph
         self.start_vertex = start_vertex
-        self.seed = seed
         self.node_mapper = node_mapper
         #map reverse complement vertices
         self.rc_vertex_map = rc_vertex_map
-        self.traversing_path = self.generate_random_eulerian_path()
+        self.generate_random_eulerian_path(0)
 
         #indices from vertices to path positions
         self.start_positions = {}
         self.end_positions = {}
-                
-    def generate_random_eulerian_path(self):
+    
+    def set_seed(self, seed):
+        self.seed = seed
+        random.seed(seed)
+
+    def generate_random_eulerian_path(self, seed):
         #Supplementary for eulerian path construction: selects random outgoing edge, returns it, removes it from graph
         def next_element(temp_graph, current_vertex):
             edges = list(temp_graph.out_edges(current_vertex, data=True, keys=True))
@@ -34,7 +42,7 @@ class PathOptimizer:
             u, v, key, data = chosen_edge
             temp_graph.remove_edge(u, v, key)
             return (EdgeDescription(u, v, int(key.split("_")[0])), v)        
-        
+        self.seed = seed        
         random.seed(self.seed)
         if nx.has_eulerian_path(self.graph, self.start_vertex):
             # Initialize the path
@@ -66,7 +74,8 @@ class PathOptimizer:
                 # Move to next node
             logging.info(f"Randomized Eulerian path found with seed {self.seed} with {len(path)} nodes !")
             logging.debug (f"{get_gaf_string(path, self.node_mapper)}")
-            return path
+            self.traversing_path = path
+            self.__update_start_end_positions()
         else:
             logging.error(f"Path not found from {self.start_vertex}")
             for v in self.graph.nodes():
@@ -82,9 +91,9 @@ class PathOptimizer:
 
     def set_path(self, new_path):
         self.traversing_path = new_path
-
-    #TODO: should happen in setter for path
-    def update_start_end_positions(self):
+        self.__update_start_end_positions()    
+    
+    def __update_start_end_positions(self):
         self.start_positions = {}
         self.end_positions = {}
 
@@ -109,7 +118,7 @@ class PathOptimizer:
         
         random.seed(iter)
         path_length = len(self.traversing_path)            
-        self.update_start_end_positions()
+        self.__update_start_end_positions()
         max_tries = 10000  # Adjust based on path length
         
         for _ in range(max_tries):
@@ -172,10 +181,10 @@ class PathOptimizer:
         return self.traversing_path
 
     #Only for logging
-    def get_synonymous_changes(self, path, alignment_scorer):
-        self.update_start_end_positions()
+    def get_synonymous_changes(self, alignment_scorer):
+        self.__update_start_end_positions()
         swappable_intervals = set()
-        final_score = alignment_scorer.score_corasick(path)
+        final_score = alignment_scorer.score_corasick(self.traversing_path)
         for start_v in self.start_positions:
             for end_v in self.end_positions:
                 for first_start_ind in range(len(self.start_positions[start_v])-1):
@@ -190,21 +199,24 @@ class PathOptimizer:
                                 #for an interval start and end can be same - one node paths. But different intervals should not overlap
                                 if end_path_first_ind < start_path_first_ind or end_path_second_ind < start_path_second_ind or start_path_second_ind <= end_path_first_ind:                                
                                     continue
-                                first_gaf_fragment = get_gaf_path(path[start_path_first_ind:end_path_first_ind+1], self.node_mapper)
-                                second_gaf_fragment = get_gaf_path(path[start_path_second_ind:end_path_second_ind+1], self.node_mapper)
+                                first_gaf_fragment = get_gaf_path(self.traversing_path[start_path_first_ind:end_path_first_ind+1], self.node_mapper)
+                                second_gaf_fragment = get_gaf_path(self.traversing_path[start_path_second_ind:end_path_second_ind+1], self.node_mapper)
                                 logging.debug(first_gaf_fragment)
                                 logging.debug(second_gaf_fragment)
                                 if first_gaf_fragment == second_gaf_fragment:
                                     logging.debug(f"Found synonymous change: {first_gaf_fragment} positions {start_path_first_ind}-{end_path_first_ind} and {start_path_second_ind}-{end_path_second_ind}, not checking")
                                     continue
                                 new_path = (
-                                path[:start_path_first_ind]
-                                    + path[start_path_second_ind:end_path_second_ind + 1]
-                                    + path[end_path_first_ind + 1:start_path_second_ind]
-                                    + path[start_path_first_ind:end_path_first_ind + 1]
-                                    + path[end_path_second_ind + 1:]
+                                    self.traversing_path[:start_path_first_ind]
+                                    + self.traversing_path[start_path_second_ind:end_path_second_ind + 1]
+                                    + self.traversing_path[end_path_first_ind + 1:start_path_second_ind]
+                                    + self.traversing_path[start_path_first_ind:end_path_first_ind + 1]
+                                    + self.traversing_path[end_path_second_ind + 1:]
                                 )
-                                log_assert((len(new_path) == len(path)), f"New path length does not match original path len = {len(path)} indices {start_path_first_ind}-{end_path_first_ind} and {start_path_second_ind}-{end_path_second_ind}")
+                                if get_gaf_string(new_path, self.node_mapper) == get_gaf_string(self.traversing_path, self.node_mapper):
+                                    logging.debug(f"Synonymous change, different fragments but same path: {first_gaf_fragment} positions {start_path_first_ind}-{end_path_first_ind} and {start_path_second_ind}-{end_path_second_ind}, not checking")
+                                    continue
+                                log_assert((len(new_path) == len(self.traversing_path)), f"New path length does not match original path len = {len(self.traversing_path)} indices {start_path_first_ind}-{end_path_first_ind} and {start_path_second_ind}-{end_path_second_ind}")
                                 new_score = alignment_scorer.score_corasick(new_path)
                                 log_assert(new_score <= final_score, "New path score is greater than original path score")
                                 logging.debug(f"New path score: {new_score}, original path score: {final_score} positions {start_path_first_ind}-{end_path_first_ind} and {start_path_second_ind}-{end_path_second_ind}")
@@ -214,10 +226,18 @@ class PathOptimizer:
 
                                     left_shift = 0
                                     right_shift = 0
-                                    while first_gaf_fragment[left_shift] == second_gaf_fragment[left_shift]:
+
+                                    min_l = min(len(first_gaf_fragment), len(second_gaf_fragment))
+                                    while left_shift < min_l and first_gaf_fragment[left_shift] == second_gaf_fragment[left_shift]:
                                         left_shift += 1
-                                    while first_gaf_fragment[-right_shift-1] == second_gaf_fragment[-right_shift-1]:
+                                    if left_shift == min_l:
+                                        left_shift -= 1
+
+                                    while right_shift < min_l and first_gaf_fragment[-right_shift-1] == second_gaf_fragment[-right_shift-1]:
                                         right_shift += 1
+                                    if right_shift == min_l:
+                                        right_shift -= 1
+
                                     logging.debug(f"Swap {start_path_first_ind}-{end_path_first_ind} with {start_path_second_ind}-{end_path_second_ind} does not change score")
                                     logging.debug(f"Tuned intervals {start_path_first_ind + left_shift}-{end_path_first_ind - right_shift} with {start_path_second_ind + left_shift}-{end_path_second_ind - right_shift}")
                                     swappable_intervals.add((start_path_first_ind + left_shift, end_path_first_ind - right_shift, start_path_second_ind + left_shift, end_path_second_ind - right_shift))
@@ -233,11 +253,11 @@ class PathOptimizer:
                     if start_path_ind < end_path_ind:
                         #invert the interval
                         # Use the static rc_path from tangle_traverser for this calculation
-                        inverted_path = rc_path(path[start_path_ind:end_path_ind + 1], self.rc_vertex_map)
-                        if get_gaf_string(inverted_path, self.node_mapper) == get_gaf_string(path[start_path_ind:end_path_ind + 1], self.node_mapper):
+                        inverted_path = rc_path(self.traversing_path[start_path_ind:end_path_ind + 1], self.rc_vertex_map)
+                        if get_gaf_string(inverted_path, self.node_mapper) == get_gaf_string(self.traversing_path[start_path_ind:end_path_ind + 1], self.node_mapper):
                             logging.debug(f"Found equivalent inverted path: {get_gaf_string(inverted_path, self.node_mapper)}")
                             continue
-                        new_path = path[:start_path_ind] + rc_path(path[start_path_ind:end_path_ind + 1], self.rc_vertex_map) + path[end_path_ind + 1:]
+                        new_path = self.traversing_path[:start_path_ind] + rc_path(self.traversing_path[start_path_ind:end_path_ind + 1], self.rc_vertex_map) + self.traversing_path[end_path_ind + 1:]
                         new_score = alignment_scorer.score_corasick(new_path)
                         log_assert(new_score <= final_score, "New path score is greater than original path score")
                         logging.debug(f"New path score: {new_score}, original path score: {final_score} positions {start_path_ind}-{end_path_ind}")
@@ -253,11 +273,69 @@ class PathOptimizer:
                 logging.warning(f"Total {len(swappable_intervals)} path swaps with the same score found!")
                 for first_start, first_end, second_start, second_end in swappable_intervals:
                     logging.info(f"Swappable interval: {first_start}-{first_end} with {second_start}-{second_end}")
-                    logging.info(f"Subpaths {get_gaf_string(path[first_start:first_end + 1], self.node_mapper)} and {get_gaf_string(path[second_start:second_end + 1], self.node_mapper)}")
+                    logging.info(f"Subpaths {get_gaf_string(self.traversing_path[first_start:first_end + 1], self.node_mapper)} and {get_gaf_string(self.traversing_path[second_start:second_end + 1], self.node_mapper)}")
             if len(invertable_intervals) > 0:
                 logging.warning(f"Total {len(invertable_intervals)} path inversions with the same score found!")
                 for start, end in invertable_intervals:
                     logging.info(f"Invertable interval: {start}-{end}")
-                    logging.info(f"Subpath {get_gaf_string(path[start:end + 1], self.node_mapper)}")
+                    logging.info(f"Subpath {get_gaf_string(self.traversing_path[start:end + 1], self.node_mapper)}")
         else:
             logging.info("No equivalent paths found")
+
+    def output_path(self, original_graph, output_fasta, output_gaf):
+        """Output the best path to FASTA and GAF files."""
+        aux = -1
+        if self.node_mapper.has_name("AUX"):
+            aux_id = self.node_mapper.get_id_for_name("AUX")
+            for i in range(len(self.traversing_path)):
+                if abs(self.traversing_path[i].original_node) == aux_id:
+                    aux = i
+                    logging.debug(f"Found AUX at position {aux}")
+                    break
+        if aux > 0:
+            paths = [self.traversing_path[:aux - 1], self.traversing_path[aux + 1:]]
+        else:
+            paths = [self.traversing_path]
+
+        gaf_file = open(output_gaf, 'w')
+        count = 0
+        for path in paths:
+            gaf_file.write(f"traversal_{count}\t{get_gaf_string(path, self.node_mapper)}\n")
+            count += 1
+        
+        with open(output_fasta, 'w') as fasta_file:
+            count = 0
+            for path in paths:
+
+                contig_sequence = ""
+                last_node = None
+                for i in range(len(path)):
+                    edge_id = path[i].original_node
+                    node_id = abs(edge_id)
+                    orientation = edge_id > 0
+
+                    # Retrieve the sequence from the graph
+                    node_sequence = original_graph.nodes[node_id]['sequence']
+                    if node_sequence == "*":
+                        logging.info("Provided noseq assembly graph, no HPC fasta output possible")
+                        return
+                    if not orientation:
+                        # Reverse complement the sequence if orientation is negative
+                        node_sequence = reverse_complement(node_sequence)
+
+                    if i == 0:
+                        overlap = max (0, len(node_sequence) - UNIQUE_BORDER_LENGTH)                
+                    else:                
+                        overlap = original_graph.get_edge_data(last_node, edge_id)['overlap']
+
+                    if i == len(self.traversing_path) - 1:                            
+                        contig_sequence += node_sequence[overlap:min(len(node_sequence),UNIQUE_BORDER_LENGTH)]
+                    else:
+                        contig_sequence += node_sequence[overlap:]
+                    last_node = edge_id
+
+                # Write the contig to the FASTA file
+                fasta_file.write(f">traversal_{count}\n")
+                fasta_file.write(f"{contig_sequence}\n")
+                count += 1
+        logging.info("Homopolymer-compressed fasta output finished")

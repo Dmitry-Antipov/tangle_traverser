@@ -165,3 +165,24 @@ class MIPOptimizer:
             coverage[abs(b)] = float(cov[abs(b)]) 
             coverage[abs(boundary_nodes[b])] = float(cov[abs(boundary_nodes[b])])
         return junction_equations, must_use_nodes, coverage, boundary_values
+    
+    def write_multiplicities(self, output_file, solution, cov):
+        """
+        Write multiplicity solutions to a CSV file.
+        
+        Args:
+            output_file: Path to the output CSV file
+            solution: Dictionary of multiplicity solutions
+            cov: Coverage dictionary
+        """
+        with open(output_file, 'w') as out_file:
+            out_file.write("node\tcoverage\tmult\n")
+            if len(solution) > 0:
+                for node_id in cov.keys():                    
+                    mult_value = solution.get(node_id, "X")
+                    rev_mult_value = solution.get(-node_id, "X")
+                    if mult_value != "X" and rev_mult_value != "X":
+                        mult_value = int(mult_value) + int(rev_mult_value)
+                    cov_value = cov.get(node_id, "N/A")
+                    out_file.write(f"{self.node_mapper.node_id_to_name[node_id]}\t{cov_value}\t{mult_value}\n")
+        logging.info(f"Wrote multiplicity solutions to {output_file}")

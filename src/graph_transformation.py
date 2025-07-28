@@ -154,22 +154,18 @@ def create_multi_dual_graph(dual_graph: nx.DiGraph, multiplicities: dict, tangle
 
     return multi_dual_graph
 
-def get_traversable_subgraph(multi_dual_graph: nx.MultiDiGraph, border_nodes, original_graph, seed, node_mapper):
+def get_traversable_subgraph(multi_dual_graph: nx.MultiDiGraph, border_nodes, original_graph, node_mapper):
     """
     Supplementary for Euler path search - search itself moved to path_optimizer.py
     """
-    random.seed(seed)
     start_vertices = []
-
     end_vertices = []
     for n in border_nodes:
         #border tips encoding
         start_vertices.append((0, n))
         end_vertices.append((n, 0))
 
-    logging.info(f"Start and end vertices in the graph {start_vertices}, {end_vertices}")
-    #adding fake links 
-    
+    logging.info(f"Start and end vertices in the graph {start_vertices}, {end_vertices}")      
 
     border_nodes_count = len(border_nodes)
     # Only 1-1 or 2-2 tangles for now
@@ -229,16 +225,3 @@ def get_traversable_subgraph(multi_dual_graph: nx.MultiDiGraph, border_nodes, or
     log_assert(len(unreachable_edges) == 0, f"Unreachable edges are still present: {unreachable_edges}")
     reachable_subgraph = multi_dual_graph.subgraph(reachable_verts)
     return reachable_subgraph, start_vertex
-
-def write_multiplicities(output_file, solution, cov, node_mapper):
-    with open(output_file, 'w') as out_file:
-        out_file.write("node\tcoverage\tmult\n")
-        if len (solution) > 0:
-            for node_id in cov.keys():                    
-                mult_value = solution.get(node_id, "X")
-                rev_mult_value = solution.get(-node_id, "X")
-                if mult_value != "X" and rev_mult_value != "X":
-                    mult_value = int(mult_value) + int(rev_mult_value)
-                cov_value = cov.get(node_id, "N/A")
-                out_file.write(f"{node_mapper.node_id_to_name[node_id]}\t{cov_value}\t{mult_value}\n")
-    logging.info(f"Wrote multiplicity solutions to {output_file}")
