@@ -3,6 +3,11 @@ TTT stands for Trivial Tangle Traverser. This tool generates "not terrible" trav
 For help run ./TTT.py --help
 
 Requires python &ge; 3.7 and dataclasses, pulp, ahocorasick, networkx, statistics, and logging python libraries.
+
+<a href="https://docs.google.com/presentation/d/1TLjG0tR3o-Un8pnRawm0XEvTZY1hqpC4o6zhUthawAw/edit?usp=sharing">Slides explaining algorithmic details </a>
+
+UNDER CONSTRUCTION!
+
 ## Usage
 
 ```bash
@@ -94,4 +99,3 @@ and then pass `utig4_upt.ont-coverage.csv` as `--coverage-file` in main script.
 Alternatively you can find how utig4- nodes match to the utig1- graph in utig42utig1.gaf and run tangle_traverser.py on the same tangle in hifi-only graph.
 
 
-UNDER CONSTRUCTION
